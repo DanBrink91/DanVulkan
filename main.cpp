@@ -5,6 +5,9 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <glm/gtx/quaternion.hpp>
+#include <glm/gtx/string_cast.hpp>
+
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
@@ -24,6 +27,8 @@
 #include <vector>
 #include <optional>
 #include <set>
+
+#include "camera.hpp"
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -200,16 +205,26 @@ private:
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;
 
+    Camera camera;
+    glm::mat4 view;
+
+    std::chrono::high_resolution_clock::time_point previousTime = std::chrono::high_resolution_clock::now();
+    double prevx, prevy;
+
+
     void initWindow() 
     {
         glfwInit();
         
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
         
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
         glfwSetWindowUserPointer(window, this);
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        glfwGetCursorPos(window, &prevx, &prevy);
+
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+        glfwSetScrollCallback(window, scroll_callback);
 
     }
 
@@ -218,7 +233,13 @@ private:
         auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
         app->framebufferResized = true;
     }
-
+    
+    static void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+    {
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->camera.rotate(glm::vec3(0.f, (float)yoffset, 0.f));
+    }
+    
     void initVulkan() 
     {
         createInstance();
@@ -277,6 +298,7 @@ private:
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
+            update();
             drawFrame();
         }
 
@@ -691,8 +713,16 @@ private:
 
         swapChainImageFormat = surfaceFormat.format;
         swapChainExtent = extent;
-    }
 
+        camera.setPerspective(45.0f, swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
+  
+        glm::vec3 pos = glm::vec3(0.5f, 2.f, 0.5f);
+        camera.setPosition(-pos);
+        camera.setRotation(glm::vec3(90.0f, 0.f, 0.f));
+        camera.setMovementSpeed(0.000000005f);
+        camera.flipY = false;
+    }
+#pragma region stuff
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags)
     {
         VkImageViewCreateInfo createInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -736,7 +766,6 @@ private:
         uboLayoutBinding.binding = 0;
         uboLayoutBinding.descriptorCount = 1;
         uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        uboLayoutBinding.pImmutableSamplers = nullptr; // optional
         uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
 
@@ -744,7 +773,6 @@ private:
         samplerLayoutBinding.binding = 1;
         samplerLayoutBinding.descriptorCount = 1;
         samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        samplerLayoutBinding.pImmutableSamplers = nullptr; // optional
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
 
@@ -1284,7 +1312,36 @@ private:
             }
         }
     }
+    
+    void update()
+    {
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        auto dt = (currentTime - previousTime).count();
+        
+        camera.keys.down = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
+        camera.keys.up = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
+        camera.keys.left = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
+        camera.keys.right = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
+        camera.update(dt);
+        
+        double xpos, ypos;
+        glfwGetCursorPos(window, &xpos, &ypos);
+        float xdelta = (float)(prevx - xpos);
+        float ydelta = (float)(prevy - ypos);
 
+        camera.rotate(glm::vec3(ydelta * 0.05f, 0.f, xdelta * 0.05f));
+
+        previousTime = currentTime;
+
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+        prevx = xpos;
+        prevy = ypos;
+        //std::cout << dt << std::endl;
+    }
+    
     void drawFrame()
     {
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
@@ -1354,7 +1411,7 @@ private:
         }
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
-
+#pragma endregion
     void updateUniformBuffer(uint32_t currentImage)
     {
         static auto startTime = std::chrono::high_resolution_clock::now();
@@ -1364,10 +1421,9 @@ private:
         
         UniformBufferObject ubo = {};
         ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
-
-        ubo.proj[1][1] *= -1; // invert y coordinate
+        ubo.view = camera.matrices.view; // glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)); // camera.matrices.view; //
+        ubo.proj = camera.matrices.perspective; //glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
+        //ubo.proj[1][1] *= -1; // invert y coordinate
 
         void* data;
         vkMapMemory(device, uniformBuffersMemory[currentImage], 0, sizeof(ubo), 0, &data);

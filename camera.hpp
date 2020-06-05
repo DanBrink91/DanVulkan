@@ -43,7 +43,7 @@ class Camera
 		}
 	
 	public:
-		enum CameraType { lookat, firstperson};
+		enum class CameraType { lookat, firstperson};
 		CameraType type = CameraType::firstperson;
 		glm::vec3 rotation = glm::vec3();
 		glm::vec3 position = glm::vec3();

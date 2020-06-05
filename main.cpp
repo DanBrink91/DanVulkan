@@ -5,6 +5,9 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/hash.hpp>
+
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtx/string_cast.hpp>
 
@@ -27,16 +30,24 @@
 #include <vector>
 #include <optional>
 #include <set>
+#include <tuple>
+
+#include <filesystem> // hot reloading
 
 #include "camera.hpp"
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
-
 struct Vertex 
 {
     glm::vec3 pos;
+//    glm::vec3 normal;
     glm::vec3 color;
-    glm::vec2 textCoord;
+    glm::vec2 texCoord;
+
+
+    bool operator==(const Vertex& other) const {
+        return pos == other.pos && color == other.color && texCoord == other.texCoord;
+    }
 
     static VkVertexInputBindingDescription getBindingDescription() 
     {
@@ -63,16 +74,27 @@ struct Vertex
         attributeDescriptions[2].binding = 0;
         attributeDescriptions[2].location = 2;
         attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT; // vec2
-        attributeDescriptions[2].offset = offsetof(Vertex, textCoord);
+        attributeDescriptions[2].offset = offsetof(Vertex, texCoord);
         
         return attributeDescriptions;
     }
+
 };
 
+namespace std {
+    template<> struct hash<Vertex> {
+        size_t operator()(Vertex const& vertex) const {
+            return ((hash<glm::vec3>()(vertex.pos) ^
+                (hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^
+                (hash<glm::vec2>()(vertex.texCoord) << 1);
+        }
+    };
+}
 struct UniformBufferObject {
     glm::mat4 model;
     glm::mat4 view;
     glm::mat4 proj;
+    float time;
 };
 
 std::vector<Vertex> vertices;
@@ -131,6 +153,8 @@ private:
     const int HEIGHT = 600;
     const std::string MODEL_PATH = "models/viking_room.obj";
     const std::string TEXTURE_PATH = "textures/viking_room.png";
+    const std::string SHADER_PATH = "shaders/";
+    std::unordered_map<std::string, std::filesystem::file_time_type> shaderPaths;
 
     GLFWwindow* window;
     VkInstance instance;
@@ -369,6 +393,18 @@ private:
         glfwTerminate();
     }
     
+    void recreateGraphicsPipeline()
+    {
+        vkDeviceWaitIdle(device); // don't touch resources that may still be in use
+        vkFreeCommandBuffers(device, commandPool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+
+        createGraphicsPipeline();
+        createCommandBuffers();
+
+    }
+
     void createInstance()
     {
         if (enableValidationLayers && !checkValidationLayerSupport()) {
@@ -459,6 +495,11 @@ private:
         {
             throw std::runtime_error("failed to find a suitable GPU!");
         }
+        
+        // check push constant size, we can only assume 128 on every device though
+        VkPhysicalDeviceProperties pdp;
+        vkGetPhysicalDeviceProperties(physicalDevice, &pdp);
+        std::cout << "Push constant max size: " << pdp.limits.maxPushConstantsSize << std::endl;
     }
 
     bool isDeviceSuitable(VkPhysicalDevice device)
@@ -714,7 +755,7 @@ private:
         swapChainImageFormat = surfaceFormat.format;
         swapChainExtent = extent;
 
-        camera.setPerspective(45.0f, swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
+        camera.setPerspective(45.0f, swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 100.0f);
   
         glm::vec3 pos = glm::vec3(0.5f, 2.f, 0.5f);
         camera.setPosition(-pos);
@@ -788,23 +829,9 @@ private:
     
     void createGraphicsPipeline()
     {
-        auto vertShaderCode = readFile("shaders/vert.spv");
-        auto fragShaderCode = readFile("shaders/frag.spv");
-
-        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
-        VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
-
-        VkPipelineShaderStageCreateInfo vertShaderStageInfo = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-        vertShaderStageInfo.module = vertShaderModule;
-        vertShaderStageInfo.pName = "main";
-
-        VkPipelineShaderStageCreateInfo fragShaderStageInfo = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-        fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        fragShaderStageInfo.module = fragShaderModule;
-        fragShaderStageInfo.pName = "main";
-
-        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+        auto [vertCreateInfo, vertShader] = loadShader("shaders/vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
+        auto  [fragCreateInfo, fragShader] = loadShader("shaders/frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertCreateInfo, fragCreateInfo };
 
         auto bindingDescription = Vertex::getBindingDescription();
         auto attributeDescriptions = Vertex::getAttributeDescriptions();
@@ -841,7 +868,7 @@ private:
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
         rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterizer.depthBiasEnable = VK_FALSE;
         rasterizer.depthBiasConstantFactor = 0.0f;
@@ -921,12 +948,14 @@ private:
         {
             throw std::runtime_error("failed to create graphics pipeline");
         }
-        vkDestroyShaderModule(device, fragShaderModule, nullptr);
-        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+
+        vkDestroyShaderModule(device, fragShader, nullptr);
+        vkDestroyShaderModule(device, vertShader, nullptr);
     }
 
     VkShaderModule createShaderModule(const std::vector<char>& code)
     {
+        // We don't delete shaderModule after creating pipeline, this could be bad?
         VkShaderModuleCreateInfo createInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
         createInfo.codeSize = code.size();
         createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
@@ -938,6 +967,19 @@ private:
         }
 
         return shaderModule;
+    }
+
+    std::tuple<VkPipelineShaderStageCreateInfo, VkShaderModule> loadShader(const std::string& filename, VkShaderStageFlagBits stage)
+    {
+        auto code = readFile(filename);
+        VkShaderModule shaderModule = createShaderModule(code);
+
+        VkPipelineShaderStageCreateInfo shaderStageCreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        shaderStageCreateInfo.stage = stage;
+        shaderStageCreateInfo.module = shaderModule;
+        shaderStageCreateInfo.pName = "main";
+
+        return { shaderStageCreateInfo, shaderModule };
     }
 
     void createRenderPass()
@@ -1339,7 +1381,7 @@ private:
         }
         prevx = xpos;
         prevy = ypos;
-        //std::cout << dt << std::endl;
+        checkFilesChanged();
     }
     
     void drawFrame()
@@ -1420,10 +1462,18 @@ private:
         float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
         
         UniformBufferObject ubo = {};
+        /*
         ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.view = glm::lookAt(glm::vec3(1.0f, 1.0f, 0.5f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
+        ubo.proj[1][1] *= -1;
+        */
+        ubo.model = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         ubo.view = camera.matrices.view; // glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)); // camera.matrices.view; //
         ubo.proj = camera.matrices.perspective; //glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
+        ubo.time = time;
         //ubo.proj[1][1] *= -1; // invert y coordinate
+        
 
         void* data;
         vkMapMemory(device, uniformBuffersMemory[currentImage], 0, sizeof(ubo), 0, &data);
@@ -1488,7 +1538,7 @@ private:
 
         void* data;
         vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
-        memcpy(data, indices.data(), (size_t)bufferSize);
+            memcpy(data, indices.data(), (size_t)bufferSize);
         vkUnmapMemory(device, stagingBufferMemory);
 
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory);
@@ -1719,6 +1769,8 @@ private:
         {
             throw std::runtime_error(warn + err);
         }
+        std::unordered_map<Vertex, uint32_t> uniqueVerticies{};
+
         for (const auto& shape : shapes)
         {
             for (const auto& index : shape.mesh.indices)
@@ -1730,18 +1782,71 @@ private:
                     attrib.vertices[3 * index.vertex_index + 1],
                     attrib.vertices[3 * index.vertex_index + 2]
                 };
-
-                vertex.textCoord = {
+                /*
+                vertex.normal = {
+                    attrib.normals[3 * index.normal_index + 0],
+                    attrib.normals[3 * index.normal_index + 1],
+                    attrib.normals[3 * index.normal_index + 2],
+                };
+                */
+                vertex.texCoord = {
                     attrib.texcoords[2 * index.texcoord_index + 0],
                     1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
                 };
 
                 vertex.color = { 1.0f, 1.0f, 1.0f };
-
-                vertices.push_back(vertex);
-                indices.push_back(indices.size());
+                if (uniqueVerticies.count(vertex) == 0)
+                {
+                    uniqueVerticies[vertex] = static_cast<uint32_t>(vertices.size());
+                    vertices.push_back(vertex);
+                }
+                indices.push_back(uniqueVerticies[vertex]);
             }
         }
+    }
+
+    void checkFilesChanged()
+    {
+        for (auto& file : std::filesystem::recursive_directory_iterator(SHADER_PATH)) 
+        {
+            if (file.path().extension().string() == ".spv") continue;
+            auto last_write_time = std::filesystem::last_write_time(file);
+
+            auto filePath = file.path().string();
+            auto keyExists = shaderPaths.find(filePath) != shaderPaths.end();
+            if (keyExists)
+            {
+                // File was written to since we last checked
+                if (last_write_time != shaderPaths[filePath])
+                {
+                    std::cout << filePath << " was changed!" << std::endl;
+                    shaderPaths[filePath] = last_write_time;
+                    shaderFileChanged(file.path());
+                }
+            }
+            else 
+            {
+                shaderPaths[filePath] = last_write_time;
+            }
+        }
+    }
+
+    void shaderFileChanged(std::filesystem::path shaderSourceFile)
+    {
+        std::string filePath = shaderSourceFile.string();
+        std::string compiledPath = shaderSourceFile.replace_extension(".spv").string();
+        std::array<char, 128> buffer;
+        std::string result;
+        std::string cmd = "glslc.exe " + filePath + " -o " +  compiledPath;
+        std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd.c_str(), "r"), _pclose);
+        if (!pipe) {
+            throw std::runtime_error("failed to send shell command for shader reload");
+        }
+        while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+            result += buffer.data();
+        }
+        std::cout << result << std::endl;
+        recreateGraphicsPipeline();
     }
 };
 

@@ -20,7 +20,7 @@ class Camera
 
 			rotM = glm::rotate(rotM, glm::radians(rotation.x * (flipY ? -1.0f : 1.0f)), glm::vec3(1.0f, 0.0f, 0.0f));
 			rotM = glm::rotate(rotM, glm::radians(rotation.y), glm::vec3(0.0f, 1.0f, 0.0f));
-			rotM = glm::rotate(rotM, glm::radians(rotation.z), glm::vec3(0.0f, 0.0f, 1.0f));
+			//rotM = glm::rotate(rotM, glm::radians(rotation.z), glm::vec3(0.0f, 0.0f, 1.0f));
 
 			glm::vec3 translation = position;
 			if (flipY) {
@@ -149,9 +149,12 @@ class Camera
 				if (moving())
 				{
 					glm::vec3 camFront;
-					camFront.x = -cos(glm::radians(rotation.x)) * sin(glm::radians(rotation.y));
-					camFront.y = sin(glm::radians(rotation.x));
-					camFront.z = cos(glm::radians(rotation.x)) * cos(glm::radians(rotation.y));
+					float x = glm::radians(rotation.x); // pitch ?
+					float y = glm::radians(rotation.y); // yaw ?
+
+					camFront.x = -cos(x) * sin(y);
+					camFront.y = sin(x);
+					camFront.z = cos(x) * cos(y);
 					camFront = glm::normalize(camFront);
 
 					float moveSpeed = deltaTime * movementSpeed;

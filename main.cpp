@@ -37,6 +37,37 @@
 #include "camera.hpp"
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
+
+struct DrawData
+{
+    uint32_t materialIndex; // Index into material buffer
+    uint32_t transformIndex; // Index into transform buffer
+    uint32_t vertexOffset; // used to lookup attributes in vertex storage buffer
+    uint32_t unused; // vec4 padding
+
+    // Gameplay data?
+};
+
+struct MaterialData
+{
+    glm::vec4 albedoTint;
+
+    float tilingX;
+    float tilingY;
+    float reflectance;
+    float unused0; // pad to vec4
+
+    uint32_t albedoTexture;
+    uint32_t normalTexture;
+    uint32_t roughnessTexture;
+    uint32_t unused01; // pad to vec4
+};
+
+struct TransformData
+{
+    glm::vec4 transform[3];
+};
+
 struct Vertex 
 {
     glm::vec3 pos;
@@ -151,7 +182,7 @@ public:
 private:
     const int WIDTH = 800;
     const int HEIGHT = 600;
-    const std::string MODEL_PATH = "models/viking_room.obj";
+    const std::string MODEL_PATH = "models/viking_room.obj"; //"models/sponza/sponza.obj";
     const std::string TEXTURE_PATH = "textures/viking_room.png";
     const std::string SHADER_PATH = "shaders/";
     std::unordered_map<std::string, std::filesystem::file_time_type> shaderPaths;
@@ -236,6 +267,13 @@ private:
     double prevx, prevy;
 
 
+    struct CameraDebugData
+    {
+        glm::vec3 forward;
+        glm::vec3 right;
+        glm::vec3 top;
+    };
+
     void initWindow() 
     {
         glfwInit();
@@ -271,6 +309,7 @@ private:
         pickPhysicalDevice();
         createLogicalDevice();
         createSwapChain();
+        loadModel();
         createImageViews();
         createRenderPass();
         createDescriptorSetLayout();
@@ -281,7 +320,6 @@ private:
         createTextureImage();
         createTextImageView();
         createTextureSampler();
-        loadModel();
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
@@ -757,11 +795,11 @@ private:
 
         camera.setPerspective(45.0f, swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 100.0f);
   
-        glm::vec3 pos = glm::vec3(0.5f, 2.f, 0.5f);
+        glm::vec3 pos = glm::vec3(0.5f, 0.5f, 1.f);
         camera.setPosition(-pos);
-        camera.setRotation(glm::vec3(90.0f, 0.f, 0.f));
-        camera.setMovementSpeed(0.000000005f);
-        camera.flipY = false;
+        camera.setRotation(glm::vec3(0.0f, 0.f, 0.f));
+        camera.setMovementSpeed(0.05f);
+        camera.flipY = true;
     }
 #pragma region stuff
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags)
@@ -1354,36 +1392,7 @@ private:
             }
         }
     }
-    
-    void update()
-    {
-        auto currentTime = std::chrono::high_resolution_clock::now();
-        auto dt = (currentTime - previousTime).count();
-        
-        camera.keys.down = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
-        camera.keys.up = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
-        camera.keys.left = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
-        camera.keys.right = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
-        camera.update(dt);
-        
-        double xpos, ypos;
-        glfwGetCursorPos(window, &xpos, &ypos);
-        float xdelta = (float)(prevx - xpos);
-        float ydelta = (float)(prevy - ypos);
 
-        camera.rotate(glm::vec3(ydelta * 0.05f, 0.f, xdelta * 0.05f));
-
-        previousTime = currentTime;
-
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-        {
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
-        }
-        prevx = xpos;
-        prevy = ypos;
-        checkFilesChanged();
-    }
-    
     void drawFrame()
     {
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
@@ -1453,26 +1462,54 @@ private:
         }
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
+    
+    void update()
+    {
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        auto dt = (currentTime - previousTime).count() * 1e-7; // Convert to seconds
+        camera.keys.down = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
+        camera.keys.up = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
+        camera.keys.left = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
+        camera.keys.right = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
+        camera.update(dt);
+        
+        double xpos, ypos;
+        glfwGetCursorPos(window, &xpos, &ypos);
+        float xdelta = (float)(xpos - prevx);
+        float ydelta = (float)(ypos - prevy);
+
+        camera.rotate(glm::vec3(ydelta * 0.05, xdelta * 0.05f, 0.f));
+
+        previousTime = currentTime;
+
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+        prevx = xpos;
+        prevy = ypos;
+        checkFilesChanged();
+    }
 #pragma endregion
     void updateUniformBuffer(uint32_t currentImage)
     {
+
         static auto startTime = std::chrono::high_resolution_clock::now();
 
         auto currentTime = std::chrono::high_resolution_clock::now();
         float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
         
-        UniformBufferObject ubo = {};
         /*
         ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         ubo.view = glm::lookAt(glm::vec3(1.0f, 1.0f, 0.5f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
         ubo.proj[1][1] *= -1;
         */
-        ubo.model = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        ubo.view = camera.matrices.view; // glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)); // camera.matrices.view; //
-        ubo.proj = camera.matrices.perspective; //glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
+        UniformBufferObject ubo = {};
+        ubo.model = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f)); // The model we use is rotated, so we put it upright here
+        ubo.view = camera.matrices.view; 
+        ubo.proj = camera.matrices.perspective; 
         ubo.time = time;
-        //ubo.proj[1][1] *= -1; // invert y coordinate
         
 
         void* data;
@@ -1764,15 +1801,23 @@ private:
         std::vector<tinyobj::shape_t> shapes;
         std::vector<tinyobj::material_t> materials;
         std::string warn, err;
-
-        if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str()))
+        std::string baseDir = MODEL_PATH.find_last_of("/\\") != std::string::npos ? MODEL_PATH.substr(0, MODEL_PATH.find_last_of("/\\")) : ".\\";
+        //baseDir = "textures/\\";
+        if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str(), baseDir.c_str()))
         {
             throw std::runtime_error(warn + err);
         }
         std::unordered_map<Vertex, uint32_t> uniqueVerticies{};
+        std::cout << warn << std::endl;
+        std::cout << materials.size() << std::endl;
+
+        //std::cout << tinyobj::material_t().
+        // TODO: Load materials
 
         for (const auto& shape : shapes)
         {
+            // set this shape's material based off the first face's material
+            int current_material_id = shape.mesh.material_ids[0];
             for (const auto& index : shape.mesh.indices)
             {
                 Vertex vertex{};

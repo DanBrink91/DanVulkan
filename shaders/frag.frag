@@ -13,20 +13,5 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
 	vec4 color = texture(texSampler, fragTexCoord);
-	
-	// -0.7 -> 0.7 on this model
-	float xToAngle = (fragPos.x + 0.3) * 2 * M_PI;  
-	
-	float shoreline = 0.1 + sin(xToAngle + time) * 0.03;
-	float axis = fragPos.z;
-
-	if(abs(axis - shoreline) < 0.003)
-	{
-		color = vec4(1.0, 1.0, 1.0, 1.0);
-	}
-	else if (axis < shoreline)
-	{
-		color.b += 0.35;
-	}
     outColor = color; 
 }

@@ -10,8 +10,8 @@
 class Camera
 {
 	private:
-		float fov;
-		float znear, zfar;
+		float fov = 0.f;
+		float znear =  0.f, zfar = 0.f;
 
 		void updateViewMatrix()
 		{

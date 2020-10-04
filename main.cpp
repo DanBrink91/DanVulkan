@@ -392,7 +392,7 @@ private:
         createDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
-        createIMGUI();
+        //createIMGUI();
         initGame();
     }
 
@@ -485,9 +485,10 @@ private:
     void cleanup() 
     {
         vkDestroyDescriptorPool(device, pool, nullptr); //imgui
+        /*
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplGlfw_Shutdown();
-        ImGui::DestroyContext();
+        ImGui::DestroyContext();*/
         cleanupSwapChain();
 
         vkDestroySampler(device, textureSampler, nullptr);
@@ -1007,6 +1008,7 @@ private:
         rasterizer.depthBiasClamp = 0.0f;
         rasterizer.depthBiasSlopeFactor = 0.0f;
 
+        std::cout << msaaSamples << std::endl;
         VkPipelineMultisampleStateCreateInfo multisampling = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
         multisampling.sampleShadingEnable = VK_TRUE;
         multisampling.rasterizationSamples = msaaSamples;
@@ -1155,8 +1157,8 @@ private:
         depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
         VkAttachmentReference colorAttachmentResolveRef = {};
-        colorAttachmentRef.attachment = 2;
-        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorAttachmentResolveRef.attachment = 2;
+        colorAttachmentResolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
         VkSubpassDescription subpass = {};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -1187,6 +1189,7 @@ private:
         {
             throw std::runtime_error("failed to create render pass!");
         }
+
     }
 
     void createFramebuffers()
@@ -1557,7 +1560,7 @@ private:
         imagesInFlight[imageIndex] = inFlightFences[currentFrame];
 
         updateUniformBuffer(imageIndex);
-        drawIMGUI();
+        //drawIMGUI();
          // Update command buffers?
         updateCommandBuffer(imageIndex);
 
@@ -1625,14 +1628,14 @@ private:
             frameIndex = 0;
         }
    
-
+        /*
         ImGuiIO& io = ImGui::GetIO();
 
 
 
         // only Process keyboard stuff if imgui doesn't want it
         if (!io.WantCaptureKeyboard)
-        {
+        {*/
             camera.keys.down = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
             camera.keys.up = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
             camera.keys.left = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
@@ -1643,23 +1646,24 @@ private:
             {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
+            /*
         }
 
         // Same with mouse capture
         if (!io.WantCaptureMouse)
-        {
+        {*/
             double xpos, ypos;
             glfwGetCursorPos(window, &xpos, &ypos);
             float xdelta = (float)(xpos - prevx);
             float ydelta = (float)(ypos - prevy);
 
             // we're only going to rotate if the mouse is pressed
-            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
+            //if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
                 camera.rotate(glm::vec3(ydelta * 0.05, xdelta * 0.05f, 0.f));
 
             prevx = xpos;
             prevy = ypos;
-        }
+      //  }
 
         if (fpsTimer > 1000.0f)
         {
@@ -1667,6 +1671,7 @@ private:
             lastTimeStamp = previousTime;
             frames = 0;
         }
+        
         previousTime = currentTime;
         checkFilesChanged();
     }
@@ -2198,7 +2203,6 @@ private:
 
         std::unordered_map<Vertex, uint32_t> uniqueVerticies{};
         //std::cout << warn << std::endl;
-        std::cout << materials.size() << std::endl;
 
         // TODO: Load materials
         int i = 0;

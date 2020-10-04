@@ -61,12 +61,12 @@ void main() {
     drawID = gl_VertexIndex;
     d = drawData[gl_DrawIDARB];
 
-    Vertex vert = verticies[gl_VertexIndex + d.vertexOffset - 6];
+    Vertex vert = verticies[gl_VertexIndex];
     TransformData t = transforms[0];
 
     vec4 positionLocal = vec4(vert.pos, 1.0);
-    // ubo.proj * ubo.view * t.model *
-    gl_Position =  positionLocal;
+    // 
+    gl_Position =  ubo.proj * ubo.view * t.model * positionLocal;
     
     fragTexCoord = vert.texCoord;
     fragColor = vert.color;

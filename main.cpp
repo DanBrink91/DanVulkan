@@ -19,6 +19,7 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 
+
 #include <imgui.h>
 #include "examples/imgui_impl_glfw.h"
 #include "examples/imgui_impl_vulkan.h"
@@ -37,6 +38,7 @@
 #include <optional>
 #include <set>
 #include <tuple>
+#include <thread>
 
 #include <filesystem> // hot reloading
 
@@ -220,8 +222,8 @@ public:
     }
 
 private:
-    const int WIDTH = 800;
-    const int HEIGHT = 600;
+    const int WIDTH = 1920;//800;
+    const int HEIGHT = 1080;//600;
     const std::string MODEL_PATH ="models/sponza/sponza.obj"; //"models/viking_room.obj";
     const std::string TEXTURE_PATH = "textures/viking_room.png";
     const std::string SHADER_PATH = "shaders/";
@@ -260,6 +262,8 @@ private:
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
 
+    VkQueryPool queryPoolTimestamp;
+    float timestampPeriod;
     VkRenderPass renderPass;
 
     VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -338,6 +342,9 @@ private:
     float culmativeDelta = 0.0f;
     double fps = 0.0;
 
+    double frameGpuAvg = 0.0;
+    double frameCpuAvg = 0.0;
+
     void initWindow() 
     {
         glfwInit();
@@ -347,6 +354,7 @@ private:
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
         glfwSetWindowUserPointer(window, this);
         glfwGetCursorPos(window, &prevx, &prevy);
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
         glfwSetScrollCallback(window, scroll_callback);
@@ -373,6 +381,7 @@ private:
         createLogicalDevice();
         createSwapChain();
         createCommandPool();
+        createQueryPool();
         loadModel();
         createImageViews();
         createRenderPass();
@@ -426,9 +435,18 @@ private:
     {
         while (!glfwWindowShouldClose(window))
         {
+            double frameCpuBegin = glfwGetTime() * 1000;
             glfwPollEvents();
             update();
             drawFrame();
+            // update title with performance
+            double frameCpuEnd = glfwGetTime() * 1000;
+            frameCpuAvg = frameCpuAvg * 0.95 + (frameCpuEnd - frameCpuBegin) * 0.05;
+            char title[256];
+
+            sprintf(title, "DanVulkan cpu %.2f ms; gpu: %.2f ms", frameCpuAvg, frameGpuAvg);
+            glfwSetWindowTitle(window, title);
+
         }
 
         vkDeviceWaitIdle(device);
@@ -484,6 +502,7 @@ private:
     }
     void cleanup() 
     {
+        vkDestroyQueryPool(device, queryPoolTimestamp, nullptr);
         vkDestroyDescriptorPool(device, pool, nullptr); //imgui
         /*
         ImGui_ImplVulkan_Shutdown();
@@ -636,6 +655,7 @@ private:
         // check push constant size, we can only assume 128 on every device though
         VkPhysicalDeviceProperties pdp;
         vkGetPhysicalDeviceProperties(physicalDevice, &pdp);
+        timestampPeriod = pdp.limits.timestampPeriod;
         //std::cout << "Push constant max size: " << pdp.limits.maxPushConstantsSize << std::endl;
     }
 
@@ -1008,7 +1028,6 @@ private:
         rasterizer.depthBiasClamp = 0.0f;
         rasterizer.depthBiasSlopeFactor = 0.0f;
 
-        std::cout << msaaSamples << std::endl;
         VkPipelineMultisampleStateCreateInfo multisampling = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
         multisampling.sampleShadingEnable = VK_TRUE;
         multisampling.rasterizationSamples = msaaSamples;
@@ -1235,6 +1254,19 @@ private:
             }
         }
     }
+
+    void createQueryPool()
+    {
+        VkQueryPoolCreateInfo createInfo = {};
+        createInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        createInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        createInfo.queryCount = 2;
+
+        if (vkCreateQueryPool(device, &createInfo, nullptr, &queryPoolTimestamp) != VK_SUCCESS)
+        {
+            throw std::runtime_error("failed to create Query Pool Timestamps");
+        }
+    }
     
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features)
     {
@@ -1292,7 +1324,6 @@ private:
 
     void createTextureImage(const char *filename)
     {
-        //std::cout << textures.size() << " " << filename << std::endl;
         Texture texture;
         int texWidth, texHeight, texChannels;
         stbi_uc* pixels = stbi_load(filename, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
@@ -1327,6 +1358,7 @@ private:
         vkFreeMemory(device, stagingBufferMemory, nullptr);
         
         textures.push_back(texture);
+
     }
     
     void createImage(uint32_t width, uint32_t height, VkSampleCountFlagBits numSamples, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, 
@@ -1369,7 +1401,6 @@ private:
 
     void createTextImageView()
     {
-        std::cout << "Texture size at image view " << textures.size() << std::endl;
         for (uint32_t i = 0;  i  < textures.size(); i++)
         {
             textures[i].imageView = createImageView(textures[i].image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -1473,6 +1504,9 @@ private:
         {
             throw std::runtime_error("failed to begin recording command buffer");
         }
+        
+        vkCmdResetQueryPool(commandBuffers[imageIndex], queryPoolTimestamp, 0, 2);
+        vkCmdWriteTimestamp(commandBuffers[imageIndex], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPoolTimestamp, 0);
 
         VkRenderPassBeginInfo renderPassInfo = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
         renderPassInfo.renderPass = renderPass;
@@ -1497,12 +1531,13 @@ private:
         vkCmdBindDescriptorSets(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1,
             &descriptorSets[imageIndex], 0, nullptr);
 
-        vkCmdDrawIndexedIndirect(commandBuffers[imageIndex], indirectCommandsBuffer[0], 0, indirectCommands.size(), sizeof(VkDrawIndexedIndirectCommand));
+        vkCmdDrawIndexedIndirect(commandBuffers[imageIndex], indirectCommandsBuffer[0], 0, (uint32_t)indirectCommands.size(), sizeof(VkDrawIndexedIndirectCommand));
         //vkCmdDrawIndexed(commandBuffers[imageIndex], static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
 
         //ImGui_ImplVulkan_RenderDrawData(imguiDrawData, commandBuffers[imageIndex]);
 
         vkCmdEndRenderPass(commandBuffers[imageIndex]);
+        vkCmdWriteTimestamp(commandBuffers[imageIndex], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPoolTimestamp, 1);
 
         if (vkEndCommandBuffer(commandBuffers[imageIndex]) != VK_SUCCESS)
         {
@@ -1605,6 +1640,15 @@ private:
             throw std::runtime_error("failed to present swap chain image");
         }
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+        // GPU timing
+        uint64_t timestampResults[2] = {};
+        vkGetQueryPoolResults(device, queryPoolTimestamp, 0, 2, sizeof(timestampResults), timestampResults, sizeof(timestampResults[0]), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        double frameGpuBegin = double(timestampResults[0]) * timestampPeriod * 1e-6;
+        double frameGpuEnd = double(timestampResults[1]) * timestampPeriod * 1e-6;
+
+
+        frameGpuAvg = frameGpuAvg * 0.95 + (frameGpuEnd - frameGpuBegin) * 0.05;
+
     }
     
     void update()
@@ -1615,7 +1659,7 @@ private:
         float fpsTimer = (float)std::chrono::duration<double, std::milli>(previousTime - lastTimeStamp).count();
 
         frames++;
-        int frameHistorySize = frameTimes.size();
+        int frameHistorySize = (int)frameTimes.size();
         frameTimes[frameIndex++] = dt ;
         if (frameIndex >= frameTimes.size())
         {
@@ -1654,8 +1698,8 @@ private:
         {*/
             double xpos, ypos;
             glfwGetCursorPos(window, &xpos, &ypos);
-            float xdelta = (float)(xpos - prevx);
-            float ydelta = (float)(ypos - prevy);
+            float xdelta = (float)-(xpos - prevx);
+            float ydelta = (float)-(ypos - prevy);
 
             // we're only going to rotate if the mouse is pressed
             //if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
@@ -1691,17 +1735,21 @@ private:
         ubo.proj[1][1] *= -1;
         */
         glm::mat4 model = glm::mat4(1.0f);//glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f)); // The model we use is rotated, so we put it upright here
-
+        glm::mat4 testModel = glm::translate(glm::mat4(1.0f), glm::vec3(200.0, 0.0, 0.0));
         UniformBufferObject ubo = {};
         ubo.view = camera.matrices.view; 
         ubo.proj = camera.matrices.perspective; 
         ubo.time = time;
         ubo.cameraPosition = camera.position;
         
-        // temp this will be filled in somewhere else
-        transformData = {
-            {model}
-        };
+        TransformData td{};
+        td.model = model;
+        TransformData testtt{};
+        testtt.model = testModel;
+        transformData.resize(2);
+        transformData[0] = td;
+        transformData[1] = testtt;
+
 
         // Update to GPU
         // UBO
@@ -1884,7 +1932,7 @@ private:
 
         VkDescriptorSetLayoutBinding samplerLayoutBinding = {};
         samplerLayoutBinding.binding = 5;
-        samplerLayoutBinding.descriptorCount = textures.size();
+        samplerLayoutBinding.descriptorCount = (uint32_t)textures.size();
         samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
@@ -1919,7 +1967,6 @@ private:
     }
     void createDescriptorPool()
     {
-        std::cout << "Textures Count: " << textures.size() << std::endl;
         std::array<VkDescriptorPoolSize, 6> poolSizes = {};
 
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -1938,7 +1985,7 @@ private:
         poolSizes[4].descriptorCount = static_cast<uint32_t>(swapChainImages.size());
 
         poolSizes[5].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[5].descriptorCount = textures.size();
+        poolSizes[5].descriptorCount = (uint32_t)textures.size();
 
         VkDescriptorPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
@@ -2049,7 +2096,7 @@ private:
             descriptorWrites[5].dstBinding = 5;
             descriptorWrites[5].dstArrayElement = 0;
             descriptorWrites[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[5].descriptorCount = imageInfo.size();
+            descriptorWrites[5].descriptorCount = (uint32_t)imageInfo.size();
             descriptorWrites[5].pImageInfo = imageInfo.data();
 
             vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
@@ -2198,8 +2245,6 @@ private:
         {
             throw std::runtime_error(warn + err);
         }
-        
-        //createTextureImage(TEXTURE_PATH.c_str());
 
         std::unordered_map<Vertex, uint32_t> uniqueVerticies{};
         //std::cout << warn << std::endl;
@@ -2216,7 +2261,6 @@ private:
             createTextureImage(mat.ambient_texname.c_str());
             i++;
         }
-
         uint32_t vertexOffset = 0;
         int indexCounter = 0;
         std::vector<Vertex> interested;
@@ -2229,9 +2273,9 @@ private:
             //std::cout << "SIZE " << shape.mesh.indices.size() << std::endl;
             DrawData dd;
             dd.materialIndex = current_material_id;
-            dd.transformIndex = 0;
+            dd.transformIndex =  0;
             dd.unused = 0;
-            dd.vertexOffset = vertices.size();
+            dd.vertexOffset = (uint32_t)vertices.size();
             drawData.push_back(dd);
             
             VkDrawIndexedIndirectCommand cmd;
@@ -2379,8 +2423,8 @@ private:
         init_info.PipelineCache = VK_NULL_HANDLE; // TODO
         init_info.DescriptorPool = pool;
         init_info.Allocator = NULL; // hope this canb e null
-        init_info.MinImageCount = swapChainFramebuffers.size();
-        init_info.ImageCount = swapChainFramebuffers.size();
+        init_info.MinImageCount = (uint32_t)swapChainFramebuffers.size();
+        init_info.ImageCount = (uint32_t)swapChainFramebuffers.size();
         init_info.CheckVkResultFn = NULL; // same here
         ImGui_ImplVulkan_Init(&init_info, renderPass);
         
@@ -2430,7 +2474,7 @@ private:
     {
         frameTimes.fill(0.0f);
 
-        camera.setPerspective(60.0f, swapChainExtent.width / (float)swapChainExtent.height, 0.01f, 10000.0f);
+        camera.setPerspective(60.0f, swapChainExtent.width / (float)swapChainExtent.height, 1.0f, 10000.0f);
 
         glm::vec3 pos = glm::vec3(845.f, -178.0f, 65.f);
         camera.setPosition(pos);

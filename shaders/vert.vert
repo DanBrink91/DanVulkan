@@ -62,7 +62,7 @@ void main() {
     d = drawData[gl_DrawIDARB];
 
     Vertex vert = verticies[gl_VertexIndex];
-    TransformData t = transforms[0];
+    TransformData t = transforms[d.transformIndex];
 
     vec4 positionLocal = vec4(vert.pos, 1.0);
     // 

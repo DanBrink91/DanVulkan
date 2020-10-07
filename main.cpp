@@ -183,6 +183,7 @@ struct Texture
     VkImage image;
     VkDeviceMemory imageMemory;
     VkImageView imageView;
+    VkFormat format;
 };
 
 std::vector<Texture> textures;
@@ -236,8 +237,8 @@ public:
     }
 
 private:
-    const int WIDTH = 1920;//800;
-    const int HEIGHT = 1080;//600;
+    int WIDTH = 800;
+    int HEIGHT = 600;
     const std::string MODEL_PATH ="models/sponza/sponza.obj"; //"models/viking_room.obj";
     const std::string TEXTURE_PATH = "textures/viking_room.png";
     const std::string SHADER_PATH = "shaders/";
@@ -363,9 +364,20 @@ private:
     void initWindow() 
     {
         glfwInit();
-        
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        
+        // setup borderless full screen
+        auto monitor = glfwGetPrimaryMonitor();
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        /*
+        glfwWindowHint(GLFW_RED_BITS, mode->redBits);
+        glfwWindowHint(GLFW_GREEN_BITS, mode->greenBits);
+        glfwWindowHint(GLFW_BLUE_BITS, mode->blueBits);
+        glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
+        */
+        WIDTH = mode->width;
+        HEIGHT = mode->height;
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+        // monitor to nullptr for windowed
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
         glfwSetWindowUserPointer(window, this);
         glfwGetCursorPos(window, &prevx, &prevy);
@@ -436,13 +448,10 @@ private:
         
         createSwapChain();
         createImageViews();
-        createRenderPass();
         createGraphicsPipeline();
         createDepthResources();
+        createColorResources();
         createFramebuffers();
-        createUniformBuffers();
-        createDescriptorPool();
-        createDescriptorSets();
         createCommandBuffers();
     }
 
@@ -487,14 +496,23 @@ private:
         }
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        vkDestroyRenderPass(device, renderPass, nullptr);
         for (auto imageView : swapChainImageViews)
         {
             vkDestroyImageView(device, imageView, nullptr);
         }
-
         vkDestroySwapchainKHR(device, swapChain, nullptr);
 
+
+    }
+    void cleanup() 
+    {
+        vkDestroyQueryPool(device, queryPoolTimestamp, nullptr);
+        vkDestroyDescriptorPool(device, pool, nullptr); //imgui
+        /*
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();*/
+        cleanupSwapChain();
         for (size_t i = 0; i < swapChainImages.size(); i++)
         {
             vkDestroyBuffer(device, matBuffers[i], nullptr);
@@ -510,28 +528,18 @@ private:
             vkFreeMemory(device, vertexBuffersMemory[i], nullptr);
             vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
             vkFreeMemory(device, indirectCommandsBufferMemory[i], nullptr);
-
-
         }
-        vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-    }
-    void cleanup() 
-    {
-        vkDestroyQueryPool(device, queryPoolTimestamp, nullptr);
-        vkDestroyDescriptorPool(device, pool, nullptr); //imgui
-        /*
-        ImGui_ImplVulkan_Shutdown();
-        ImGui_ImplGlfw_Shutdown();
-        ImGui::DestroyContext();*/
-        cleanupSwapChain();
-
-        vkDestroySampler(device, textureSampler, nullptr);
         for (Texture t : textures)
         {
             vkDestroyImage(device, t.image, nullptr);
             vkFreeMemory(device, t.imageMemory, nullptr);
             vkDestroyImageView(device, t.imageView, nullptr);
         }
+        vkDestroyRenderPass(device, renderPass, nullptr);
+
+        vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+        vkDestroySampler(device, textureSampler, nullptr);
+
 
 
         vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
@@ -1347,6 +1355,18 @@ private:
             std::cout << stbi_failure_reason() << std::endl;
             throw std::runtime_error("failed to load texture image!");
         }
+        /*
+        don't think we need this?
+        if (strstr(filename, "bump") != NULL || strstr(filename, "spec") != NULL)
+        {
+            texture.format = VK_FORMAT_R8G8B8A8_UNORM;
+        }
+        else
+        {
+            texture.format = VK_FORMAT_R8G8B8A8_SRGB;
+        }
+        */
+        texture.format = VK_FORMAT_R8G8B8A8_SRGB;
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
@@ -1360,12 +1380,13 @@ private:
 
         stbi_image_free(pixels);
 
-        createImage(texWidth, texHeight, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        createImage(texWidth, texHeight, VK_SAMPLE_COUNT_1_BIT, texture.format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, texture.image, texture.imageMemory);
 
-        transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        transitionImageLayout(texture.image, texture.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         copyBufferToImage(stagingBuffer, texture.image, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-        transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        transitionImageLayout(texture.image, texture.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
@@ -1416,7 +1437,7 @@ private:
     {
         for (uint32_t i = 0;  i  < textures.size(); i++)
         {
-            textures[i].imageView = createImageView(textures[i].image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
+            textures[i].imageView = createImageView(textures[i].image, textures[i].format, VK_IMAGE_ASPECT_COLOR_BIT);
         }
     }
     
@@ -1755,12 +1776,12 @@ private:
         ubo.proj = camera.matrices.perspective; 
         ubo.time = time;
         ubo.cameraPosition = camera.position;
-        ubo.lightPos = glm::vec3(lightPos);
-
-        if (lightPos.x > 1100.0 || lightPos.x < 100.0)
+        ubo.lightPos = lightPos;
+  
+        if (lightPos.x > 1100.0 || lightPos.x < -1900.0)
             lightSpeed.x *= -1;
-        //lightPos += lightSpeed;
-
+        lightPos += lightSpeed;
+        
         // Update to GPU
         // UBO
         void* data;
@@ -1839,7 +1860,6 @@ private:
     void createUniformBuffers()
     {
         VkDeviceSize bufferSize = sizeof(UniformBufferObject);
-        std::cout << sizeof(UniformBufferObject) << std::endl;
         uniformBuffers.resize(swapChainImages.size());
         uniformBuffersMemory.resize(swapChainImages.size());
 
@@ -2274,6 +2294,10 @@ private:
                 md.albedoTexture = i;
                 createTextureImage(mat.ambient_texname.c_str());
                 i++;
+                if (mat.ambient_texname.find("curtain") != std::string::npos)
+                {
+                    std::cout << mat.bump_texname << std::endl;
+                }
             }
             
             if (mat.bump_texname.length() > 0)
@@ -2281,6 +2305,10 @@ private:
                 md.normalTexture = i;
                 createTextureImage(mat.bump_texname.c_str());
                 i++;
+            }
+            else
+            {
+                md.normalTexture = -1;
             }
 
             if (mat.specular_texname.length() > 0)
@@ -2375,16 +2403,41 @@ private:
             glm::vec2 deltaUV2 = v3.texCoord - v1.texCoord;
 
             float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
-            glm::vec3 tangent1;
-            tangent1.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
-            tangent1.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
-            tangent1.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
+            glm::vec3 tangent;
+            tangent.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
+            tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
+            tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
+
+            glm::vec3 b = (edge2 * deltaUV1.x - edge1 * deltaUV2.x) * f;
             
+            // Gram-Schmidt othoganlize
+            glm::vec3 tangent1 = glm::normalize(tangent - v1.normal * glm::dot(v1.normal, tangent));
+            glm::vec3 tangent2 = glm::normalize(tangent - v2.normal * glm::dot(v2.normal, tangent));
+            glm::vec3 tangent3 = glm::normalize(tangent - v3.normal * glm::dot(v3.normal, tangent));
+             
+            // fix handedness
+            
+            if (glm::dot(glm::cross(v1.normal, tangent1), b) < 0.0f)
+            {
+                tangent1 = tangent1 * -1.0f;
+            }
+
+
+            if (glm::dot(glm::cross(v2.normal, tangent2), b) < 0.0f)
+            {
+                //std::cout << "fixing handedness" << std::endl;
+                tangent2 = tangent2 * -1.0f;
+            }
+
+
+            if (glm::dot(glm::cross(v3.normal, tangent3), b) < 0.0f)
+            {
+               // std::cout << "fixing handedness" << std::endl;
+                tangent3 = tangent3 * -1.0f;
+            }
             vertices[i].tangent = tangent1;
-
-            vertices[i + 1].tangent = tangent1;
-
-            vertices[i + 2].tangent = tangent1;
+            vertices[i + 1].tangent = tangent2;
+            vertices[i + 2].tangent = tangent3;
 
         }
     }
@@ -2527,13 +2580,13 @@ private:
 
         camera.setPerspective(60.0f, swapChainExtent.width / (float)swapChainExtent.height, 1.0f, 10000.0f);
 
-        glm::vec3 pos = glm::vec3(0.f, -150.f, 65.f);
+        glm::vec3 pos = glm::vec3(-100.f, -150.f, 65.f);
         camera.setPosition(pos);
         camera.setRotation(glm::vec3(180.0f, -88.8f, 90.f));
         camera.setMovementSpeed(0.5f);
         camera.flipY = false;
 
-        lightPos = glm::vec3(0.f, -250.0f, 65.f);
+        lightPos = glm::vec3(-100.f, -150.0f, 65.f);
         lightSpeed = glm::vec3(1.5, 0, 0);
     }
 };

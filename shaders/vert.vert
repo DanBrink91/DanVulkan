@@ -55,12 +55,16 @@ layout(set = 0, binding = 2) readonly buffer Draws
     DrawData drawData[];
 };
 
-layout(location = 0) out vec3 fragColor;
+layout(location = 0) out vec3 vertNormal;
 layout(location = 1) out vec2 fragTexCoord;
 layout(location = 2) out int matID;
 layout(location = 3) out vec3 fragPos;
 layout(location = 4) out vec3 viewPos;
 layout(location = 5) out vec3 lightPos;
+layout(location = 6) out vec3 lightDir;
+layout(location = 7) out mat3 TBN;
+
+
 
 
 void main() {
@@ -71,19 +75,24 @@ void main() {
     TransformData t = transforms[d.transformIndex];
 
     vec4 positionLocal = vec4(vert.pos, 1.0);
-    // 
-    gl_Position =  ubo.proj * ubo.view * t.model * positionLocal;
+    gl_Position =  (ubo.proj * ubo.view * t.model * positionLocal);
     
-    vec3 T = normalize(vec3(t.model * vec4(vert.tangent, 0.0)));
-    vec3 N = normalize(vec3(t.model * vec4(vert.normal, 0.0)));
+    vec3 Tangent = normalize(vert.tangent);
+    vec3 Normal = normalize(vert.normal);
+    vec3 T = normalize(vec3(t.model * vec4(Tangent, 0.0)));
+    vec3 N = normalize(vec3(t.model * vec4(Normal, 0.0)));
     vec3 B = cross(N, T);
 
-    mat3 TBN = mat3(T, B, N);
+    TBN = mat3(T, B, N);
 
     fragTexCoord = vert.texCoord;
-    fragColor = vert.color;
+    vertNormal = vert.normal;
     matID = d.materialIndex;
-    fragPos = TBN * vec3(t.model * positionLocal);
-    viewPos = TBN * ubo.cameraPos;
-    lightPos = TBN * ubo.lightPos;
+    fragPos = (t.model * positionLocal).xyz;
+    
+    lightPos =  -ubo.cameraPos;
+    
+
+    viewPos =  (ubo.cameraPos - fragPos);
+    lightDir =  (lightPos - fragPos); 
 }

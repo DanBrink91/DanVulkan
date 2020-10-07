@@ -80,14 +80,19 @@ struct Vertex
 {
     glm::vec3 pos;
     float unused0;
+
     glm::vec3 normal;
     float unused01;
+
     glm::vec3 color;
     float unused02;
+
     glm::vec2 texCoord;
     float unused03;
     float unused04;
 
+    glm::vec3 tangent;
+    float unused05;
 
     bool operator==(const Vertex& other) const {
         return pos == other.pos && color == other.color && texCoord == other.texCoord;
@@ -150,8 +155,15 @@ namespace std {
 struct UniformBufferObject {
     glm::mat4 view;
     glm::mat4 proj;
+
     float time;
+    glm::vec3 unused0;
+
     glm::vec3 cameraPosition;
+    float unused01;
+
+    glm::vec3 lightPos;
+    float unused02;
 };
 
 std::vector<Vertex> vertices;
@@ -159,6 +171,8 @@ std::vector<uint32_t> indices;
 std::vector<MaterialData> matData;
 std::vector<TransformData> transformData;
 std::vector<DrawData> drawData;
+
+std::vector<void*> vertexDataPointers, materialDataPointers, transformDataPointers, drawDataPointers;
 
 std::vector<VkDrawIndexedIndirectCommand> indirectCommands;
 std::vector<VkBuffer> indirectCommandsBuffer;
@@ -327,6 +341,7 @@ private:
 
     ImDrawData* imguiDrawData;
 
+    glm::vec3 lightPos, lightSpeed;
     struct CameraDebugData
     {
         glm::vec3 forward;
@@ -986,8 +1001,6 @@ private:
         auto  [fragCreateInfo, fragShader] = loadShader("shaders/frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
         VkPipelineShaderStageCreateInfo shaderStages[] = { vertCreateInfo, fragCreateInfo };
 
-        auto bindingDescription = Vertex::getBindingDescription();
-        auto attributeDescriptions = Vertex::getAttributeDescriptions();
         VkPipelineVertexInputStateCreateInfo vertexInputInfo = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
         vertexInputInfo.vertexBindingDescriptionCount = 0; // 1
         vertexInputInfo.pVertexBindingDescriptions = nullptr;// &bindingDescription;
@@ -1736,20 +1749,17 @@ private:
         */
         glm::mat4 model = glm::mat4(1.0f);//glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f)); // The model we use is rotated, so we put it upright here
         glm::mat4 testModel = glm::translate(glm::mat4(1.0f), glm::vec3(200.0, 0.0, 0.0));
+        
         UniformBufferObject ubo = {};
         ubo.view = camera.matrices.view; 
         ubo.proj = camera.matrices.perspective; 
         ubo.time = time;
         ubo.cameraPosition = camera.position;
-        
-        TransformData td{};
-        td.model = model;
-        TransformData testtt{};
-        testtt.model = testModel;
-        transformData.resize(2);
-        transformData[0] = td;
-        transformData[1] = testtt;
+        ubo.lightPos = glm::vec3(lightPos);
 
+        if (lightPos.x > 1100.0 || lightPos.x < 100.0)
+            lightSpeed.x *= -1;
+        //lightPos += lightSpeed;
 
         // Update to GPU
         // UBO
@@ -1759,20 +1769,13 @@ private:
         vkUnmapMemory(device, uniformBuffersMemory[currentImage]);
 
         // Verticies
-        vkMapMemory(device, vertexBuffersMemory[currentImage], 0, sizeof(Vertex) * vertices.size(), 0, &data);
-            memcpy(data, vertices.data(), sizeof(Vertex) * vertices.size());
-        vkUnmapMemory(device, vertexBuffersMemory[currentImage]);
-
-        void* tData;
+        memcpy(vertexDataPointers[currentImage], vertices.data(), sizeof(Vertex) * vertices.size());
         // Transform
-        vkMapMemory(device, transformBuffersMemory[currentImage], 0, sizeof(TransformData) * transformData.size(), 0, &tData);
-         memcpy(tData, transformData.data(), sizeof(TransformData) * transformData.size());
-        vkUnmapMemory(device, transformBuffersMemory[currentImage]);
-
+        memcpy(transformDataPointers[currentImage], transformData.data(), sizeof(TransformData) * transformData.size());
+        // Material Data
+        memcpy(materialDataPointers[currentImage], matData.data(), sizeof(MaterialData) * matData.size());
         // Draw Data
-        vkMapMemory(device, drawBuffersMemory[currentImage], 0, sizeof(DrawData) * drawData.size(), 0, &data);
-        memcpy(data, drawData.data(), sizeof(DrawData) * drawData.size());
-        vkUnmapMemory(device, drawBuffersMemory[currentImage]);
+        memcpy(drawDataPointers[currentImage], drawData.data(), sizeof(DrawData) * drawData.size());
     }
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory)
@@ -1836,7 +1839,7 @@ private:
     void createUniformBuffers()
     {
         VkDeviceSize bufferSize = sizeof(UniformBufferObject);
-
+        std::cout << sizeof(UniformBufferObject) << std::endl;
         uniformBuffers.resize(swapChainImages.size());
         uniformBuffersMemory.resize(swapChainImages.size());
 
@@ -1851,22 +1854,26 @@ private:
     {
         matBuffers.resize(swapChainImages.size());
         matBuffersMemory.resize(swapChainImages.size());
+        materialDataPointers.resize(swapChainImages.size());
 
         transformBuffers.resize(swapChainImages.size());
         transformBuffersMemory.resize(swapChainImages.size());
+        transformDataPointers.resize(swapChainImages.size());
 
         drawBuffers.resize(swapChainImages.size());
         drawBuffersMemory.resize(swapChainImages.size());
+        drawDataPointers.resize(swapChainImages.size());
 
 
         vertexBuffers.resize(swapChainImages.size());
         vertexBuffersMemory.resize(swapChainImages.size());
+        vertexDataPointers.resize(swapChainImages.size());
 
         indirectCommandsBuffer.resize(swapChainImages.size());
         indirectCommandsBufferMemory.resize(swapChainImages.size());
 
         // TODO: Pick a size for these, the size of the vector WILL change
-        VkDeviceSize matBufferSize = sizeof(MaterialData) * MatDataCount;
+        VkDeviceSize matBufferSize = sizeof(MaterialData) * matData.size();
         VkDeviceSize transformBufferSize = sizeof(TransformData) * TransformDataCount;
         VkDeviceSize drawBufferSize = sizeof(DrawData) * drawData.size();
         VkDeviceSize vertexBufferSize = sizeof(vertices[0]) * vertices.size();
@@ -1888,6 +1895,11 @@ private:
             // Verticies
             createBuffer(vertexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 vertexBuffers[i], vertexBuffersMemory[i]);
+
+            vkMapMemory(device, matBuffersMemory[i], 0, sizeof(MaterialData) * matData.size(), 0, &materialDataPointers[i]);
+            vkMapMemory(device, transformBuffersMemory[i], 0, sizeof(TransformData) * transformData.size(), 0, &transformDataPointers[i]);
+            vkMapMemory(device, drawBuffersMemory[i], 0, sizeof(DrawData) * drawData.size(), 0, &drawDataPointers[i]);
+            vkMapMemory(device, vertexBuffersMemory[i], 0, sizeof(Vertex) * vertices.size(), 0, &vertexDataPointers[i]);
         }
 
     }
@@ -1910,7 +1922,7 @@ private:
         materialLayoutBinding.binding = 1;
         materialLayoutBinding.descriptorCount = 1;
         materialLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        materialLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        materialLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutBinding drawLayoutBinding = {};
         drawLayoutBinding.binding = 2;
@@ -2021,7 +2033,7 @@ private:
             VkDescriptorBufferInfo matBufferInfo{};
             matBufferInfo.buffer = matBuffers[i];
             matBufferInfo.offset = 0;
-            matBufferInfo.range = sizeof(MaterialData) * MatDataCount;
+            matBufferInfo.range = sizeof(MaterialData) * matData.size();
 
             VkDescriptorBufferInfo drawBufferInfo{};
             drawBufferInfo.buffer = drawBuffers[i];
@@ -2031,7 +2043,7 @@ private:
             VkDescriptorBufferInfo transformBufferInfo{};
             transformBufferInfo.buffer = transformBuffers[i];
             transformBufferInfo.offset = 0;
-            transformBufferInfo.range = sizeof(TransformData) * TransformDataCount;
+            transformBufferInfo.range = sizeof(TransformData) * transformData.size();
 
             VkDescriptorBufferInfo vertexBufferInfo{};
             vertexBufferInfo.buffer = vertexBuffers[i];
@@ -2248,18 +2260,40 @@ private:
 
         std::unordered_map<Vertex, uint32_t> uniqueVerticies{};
         //std::cout << warn << std::endl;
-
+        TransformData td{ };
+        td.model = glm::mat4(1.0f);
+        transformData.push_back(td);
         // TODO: Load materials
         int i = 0;
         for (auto mat : materials)
         {
-            if (mat.ambient_texname.length() == 0)
+            MaterialData md{};
+            md.reflectance = mat.shininess;
+            if (mat.ambient_texname.length() > 0)
             {
-                //std::cout << "Skipped material index: " << i << std::endl;
-                continue;
+                md.albedoTexture = i;
+                createTextureImage(mat.ambient_texname.c_str());
+                i++;
             }
-            createTextureImage(mat.ambient_texname.c_str());
-            i++;
+            
+            if (mat.bump_texname.length() > 0)
+            {
+                md.normalTexture = i;
+                createTextureImage(mat.bump_texname.c_str());
+                i++;
+            }
+
+            if (mat.specular_texname.length() > 0)
+            {
+                md.roughnessTexture = i;
+                createTextureImage(mat.specular_texname.c_str());
+                i++;
+            }
+            else {
+                md.roughnessTexture = -1;
+            }
+            //std::cout << mat. << std::endl;
+            matData.push_back(md);
         }
         uint32_t vertexOffset = 0;
         int indexCounter = 0;
@@ -2268,8 +2302,6 @@ private:
         {
             // set this shape's material based off the first face's material
             int current_material_id = shape.mesh.material_ids[0];
-            if (current_material_id >= 12) current_material_id--;
-
             //std::cout << "SIZE " << shape.mesh.indices.size() << std::endl;
             DrawData dd;
             dd.materialIndex = current_material_id;
@@ -2309,6 +2341,7 @@ private:
                     1.0f - attrib.texcoords[2 * (int)index.texcoord_index + 1]
                 };
 
+
                 vertex.color = { 1.0f, 1.0f, 1.0f };
                 if (uniqueVerticies.count(vertex) == 0)
                 {
@@ -2330,12 +2363,30 @@ private:
             indexCounter++;
 
         }
-        //std::cout << "Interested Vertex Positions: " << std::endl;
-        for (auto v : interested)
+        for (int i = 0; i < vertices.size(); i+=3)
         {
-        //    std::cout << glm::to_string(v.pos) << std::endl;
+            Vertex v1 = vertices[i];
+            Vertex v2 = vertices[i + 1];
+            Vertex v3 = vertices[i + 2];
+
+            glm::vec3 edge1 = v2.pos - v1.pos;
+            glm::vec3 edge2 = v3.pos - v1.pos;
+            glm::vec2 deltaUV1 = v2.texCoord - v1.texCoord;
+            glm::vec2 deltaUV2 = v3.texCoord - v1.texCoord;
+
+            float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
+            glm::vec3 tangent1;
+            tangent1.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
+            tangent1.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
+            tangent1.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
+            
+            vertices[i].tangent = tangent1;
+
+            vertices[i + 1].tangent = tangent1;
+
+            vertices[i + 2].tangent = tangent1;
+
         }
-        //std::cout << drawData.back().vertexOffset << std::endl;
     }
 
     void checkFilesChanged()
@@ -2476,11 +2527,14 @@ private:
 
         camera.setPerspective(60.0f, swapChainExtent.width / (float)swapChainExtent.height, 1.0f, 10000.0f);
 
-        glm::vec3 pos = glm::vec3(845.f, -178.0f, 65.f);
+        glm::vec3 pos = glm::vec3(0.f, -150.f, 65.f);
         camera.setPosition(pos);
         camera.setRotation(glm::vec3(180.0f, -88.8f, 90.f));
         camera.setMovementSpeed(0.5f);
         camera.flipY = false;
+
+        lightPos = glm::vec3(0.f, -250.0f, 65.f);
+        lightSpeed = glm::vec3(1.5, 0, 0);
     }
 };
 

@@ -8,6 +8,9 @@ layout(binding = 0) uniform UniformBufferObject {
 	mat4 proj;
 	float time;
 	vec3 cameraPos;
+    vec3 lightPos;
+    float unused0;
+    vec4 unused1;
 } ubo;
 
 struct Vertex 
@@ -21,6 +24,8 @@ struct Vertex
     vec2 texCoord;
     float unused03;
     float unused04;
+    vec3 tangent;
+    float unused05;
 };
 
 layout(set = 0, binding = 4) readonly buffer Verticies 
@@ -53,13 +58,14 @@ layout(set = 0, binding = 2) readonly buffer Draws
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 fragTexCoord;
 layout(location = 2) out int matID;
-layout(location = 3) out int drawID;
-layout(location = 4) out DrawData d;
+layout(location = 3) out vec3 fragPos;
+layout(location = 4) out vec3 viewPos;
+layout(location = 5) out vec3 lightPos;
 
 
 void main() {
-    drawID = gl_VertexIndex;
-    d = drawData[gl_DrawIDARB];
+    int drawID = gl_VertexIndex;
+    DrawData d = drawData[gl_DrawIDARB];
 
     Vertex vert = verticies[gl_VertexIndex];
     TransformData t = transforms[d.transformIndex];
@@ -68,7 +74,16 @@ void main() {
     // 
     gl_Position =  ubo.proj * ubo.view * t.model * positionLocal;
     
+    vec3 T = normalize(vec3(t.model * vec4(vert.tangent, 0.0)));
+    vec3 N = normalize(vec3(t.model * vec4(vert.normal, 0.0)));
+    vec3 B = cross(N, T);
+
+    mat3 TBN = mat3(T, B, N);
+
     fragTexCoord = vert.texCoord;
     fragColor = vert.color;
     matID = d.materialIndex;
+    fragPos = TBN * vec3(t.model * positionLocal);
+    viewPos = TBN * ubo.cameraPos;
+    lightPos = TBN * ubo.lightPos;
 }

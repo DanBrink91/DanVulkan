@@ -61,8 +61,7 @@ layout(location = 2) out int matID;
 layout(location = 3) out vec3 fragPos;
 layout(location = 4) out vec3 viewPos;
 layout(location = 5) out vec3 lightPos;
-layout(location = 6) out vec3 lightDir;
-layout(location = 7) out mat3 TBN;
+layout(location = 6) out mat3 TBN;
 
 
 
@@ -88,11 +87,11 @@ void main() {
     fragTexCoord = vert.texCoord;
     vertNormal = vert.normal;
     matID = d.materialIndex;
-    fragPos = (t.model * positionLocal).xyz;
     
-    lightPos =  -ubo.cameraPos;
+    fragPos =  (t.model * positionLocal).xyz;
+
+    lightPos =   ubo.lightPos;
     
 
-    viewPos =  (ubo.cameraPos - fragPos);
-    lightDir =  (lightPos - fragPos); 
+    viewPos =   (ubo.cameraPos - fragPos);
 }

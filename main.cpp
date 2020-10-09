@@ -342,7 +342,7 @@ private:
 
     ImDrawData* imguiDrawData;
 
-    glm::vec3 lightPos, lightSpeed;
+    glm::vec3 lightPos, lightSpeed, cameraStart, cameraStop;
     struct CameraDebugData
     {
         glm::vec3 forward;
@@ -1355,8 +1355,7 @@ private:
             std::cout << stbi_failure_reason() << std::endl;
             throw std::runtime_error("failed to load texture image!");
         }
-        /*
-        don't think we need this?
+        
         if (strstr(filename, "bump") != NULL || strstr(filename, "spec") != NULL)
         {
             texture.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1365,8 +1364,7 @@ private:
         {
             texture.format = VK_FORMAT_R8G8B8A8_SRGB;
         }
-        */
-        texture.format = VK_FORMAT_R8G8B8A8_SRGB;
+        //texture.format = VK_FORMAT_R8G8B8A8_SRGB;
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
@@ -2294,10 +2292,10 @@ private:
                 md.albedoTexture = i;
                 createTextureImage(mat.ambient_texname.c_str());
                 i++;
-                if (mat.ambient_texname.find("curtain") != std::string::npos)
+                /*if (mat.ambient_texname.find("lion") != std::string::npos)
                 {
-                    std::cout << mat.bump_texname << std::endl;
-                }
+                    std::cout << matData.size() << std::endl;
+                }*/
             }
             
             if (mat.bump_texname.length() > 0)
@@ -2330,6 +2328,10 @@ private:
         {
             // set this shape's material based off the first face's material
             int current_material_id = shape.mesh.material_ids[0];
+            if (current_material_id == 23)
+            {
+                //std::cout << drawData.size() << std::endl;
+            }
             //std::cout << "SIZE " << shape.mesh.indices.size() << std::endl;
             DrawData dd;
             dd.materialIndex = current_material_id;
@@ -2393,6 +2395,7 @@ private:
         }
         for (int i = 0; i < vertices.size(); i+=3)
         {
+
             Vertex v1 = vertices[i];
             Vertex v2 = vertices[i + 1];
             Vertex v3 = vertices[i + 2];
@@ -2403,10 +2406,12 @@ private:
             glm::vec2 deltaUV2 = v3.texCoord - v1.texCoord;
 
             float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
+            if (isinf(f)) f = 1.0;
             glm::vec3 tangent;
             tangent.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
             tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
             tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
+            tangent = glm::normalize(tangent);
 
             glm::vec3 b = (edge2 * deltaUV1.x - edge1 * deltaUV2.x) * f;
             
@@ -2417,28 +2422,25 @@ private:
              
             // fix handedness
             
-            if (glm::dot(glm::cross(v1.normal, tangent1), b) < 0.0f)
+            if (glm::dot(glm::cross(v1.normal, tangent), b) < 0.0f)
             {
-                tangent1 = tangent1 * -1.0f;
+                tangent = tangent * -1.0f;
             }
-
 
             if (glm::dot(glm::cross(v2.normal, tangent2), b) < 0.0f)
             {
-                //std::cout << "fixing handedness" << std::endl;
                 tangent2 = tangent2 * -1.0f;
             }
 
 
             if (glm::dot(glm::cross(v3.normal, tangent3), b) < 0.0f)
             {
-               // std::cout << "fixing handedness" << std::endl;
                 tangent3 = tangent3 * -1.0f;
             }
+
             vertices[i].tangent = tangent1;
             vertices[i + 1].tangent = tangent2;
             vertices[i + 2].tangent = tangent3;
-
         }
     }
 
@@ -2588,6 +2590,16 @@ private:
 
         lightPos = glm::vec3(-100.f, -150.0f, 65.f);
         lightSpeed = glm::vec3(1.5, 0, 0);
+
+        /* lion head spots
+        DrawData lion1 = drawData[375], lion2 = drawData[376];
+        Vertex v1 = vertices[lion1.vertexOffset];
+        Vertex v2 = vertices[lion2.vertexOffset];
+
+        lightPos = v2.pos;
+        lightSpeed = glm::normalize(v2.pos - v1.pos);
+     
+        cameraStop = v1.pos;*/
     }
 };
 

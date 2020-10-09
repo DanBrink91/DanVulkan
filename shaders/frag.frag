@@ -30,15 +30,14 @@ layout(location = 2) flat in int matID;
 layout(location = 3) in vec3 fragPos;
 layout(location = 4) in vec3 viewPos;
 layout(location = 5) in vec3 lightPos;
-layout(location = 6) in vec3 lightDir;
 layout(location = 7) in mat3 TBN;
+
 
 
 layout(location = 0) out vec4 outColor;
 #define M_PI 3.1415926535897932384626433832795
 
 void main() {
-	vec3 LightColor = vec3(1, 1, 1);
 	float LightPower = 250;
 	
 	MaterialData md = mats[matID];
@@ -47,35 +46,36 @@ void main() {
 	vec3 normal;
 	if (md.normalTexture >= 0)
 	{
-		normal =  texture(texSampler[md.normalTexture], fragTexCoord).rgb;
-		normal = (normal * 2.0 - 1.0);
-		// Tanget crap is broken here!
+		normal =   TBN * normalize(texture(texSampler[md.normalTexture], fragTexCoord).rgb);
+
 	}
 	else 
 	{
-		normal =  vertNormal;
+		normal = vertNormal;
 	}
 
 
-	vec3 ambient = diffuseColor * 0.05;
+	vec3 ambient = diffuseColor * 0.1;
 
-	float distance = length(fragPos - lightPos);
-	vec3 lightD = normalize(lightDir);
+	float distance = length(fragPos - lightPos) * 0.9;
+	vec3 lightDir = normalize(lightPos - fragPos);
 
-	float diff = clamp(dot(normal, lightD), 0, 1);
-	vec3 diffuse = diff  * diffuseColor * LightPower / distance;
+	float diff = max(dot(normal, lightDir), 0.0);
+	vec3 diffuse = diff  * diffuseColor * LightPower / (distance);
 
 
 	vec3 result = ambient + diffuse;
 	if (md.roughnessTexture >= 0)
 	{
 		vec3 specularColor = texture(texSampler[md.roughnessTexture], fragTexCoord).rgb;
-
+		vec3 viewDir = normalize(viewPos - fragPos);
 		vec3 E = normalize(viewPos);
 
-		vec3 reflectDir = reflect(-lightD, normal);
-		float spec = pow(clamp(dot(E, reflectDir), 0, 1), md.reflectance);
-		vec3 specular =  spec * specularColor * LightPower / distance;
+		vec3 reflectDir = reflect(-lightDir, normal);
+		vec3 halfwayDir = normalize(lightDir + viewDir);
+
+		float spec = pow(clamp(dot(normal, halfwayDir), 0, 1), md.reflectance);
+		vec3 specular =  spec * specularColor * LightPower / (distance );
 		result +=  specular;
 	}
 

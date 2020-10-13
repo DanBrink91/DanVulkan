@@ -239,7 +239,7 @@ public:
 private:
     int WIDTH = 800;
     int HEIGHT = 600;
-    const std::string MODEL_PATH ="models/sponza/sponza.obj"; //"models/viking_room.obj";
+    const std::string MODEL_PATH = "models/sponza/sponza.obj"; //"models/viking_room.obj";
     const std::string TEXTURE_PATH = "textures/viking_room.png";
     const std::string SHADER_PATH = "shaders/";
     std::unordered_map<std::string, std::filesystem::file_time_type> shaderPaths;
@@ -1364,7 +1364,7 @@ private:
         {
             texture.format = VK_FORMAT_R8G8B8A8_SRGB;
         }
-        //texture.format = VK_FORMAT_R8G8B8A8_SRGB;
+        texture.format = VK_FORMAT_R8G8B8A8_SRGB;
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
@@ -2289,17 +2289,16 @@ private:
             md.reflectance = mat.shininess;
             if (mat.ambient_texname.length() > 0)
             {
+
                 md.albedoTexture = i;
                 createTextureImage(mat.ambient_texname.c_str());
                 i++;
-                /*if (mat.ambient_texname.find("lion") != std::string::npos)
-                {
-                    std::cout << matData.size() << std::endl;
-                }*/
+
             }
             
             if (mat.bump_texname.length() > 0)
             {
+
                 md.normalTexture = i;
                 createTextureImage(mat.bump_texname.c_str());
                 i++;
@@ -2395,7 +2394,6 @@ private:
         }
         for (int i = 0; i < vertices.size(); i+=3)
         {
-
             Vertex v1 = vertices[i];
             Vertex v2 = vertices[i + 1];
             Vertex v3 = vertices[i + 2];
@@ -2438,9 +2436,9 @@ private:
                 tangent3 = tangent3 * -1.0f;
             }
 
-            vertices[i].tangent = tangent1;
-            vertices[i + 1].tangent = tangent2;
-            vertices[i + 2].tangent = tangent3;
+            vertices[i].tangent = tangent;
+            vertices[i + 1].tangent = tangent;
+            vertices[i + 2].tangent = tangent;
         }
     }
 

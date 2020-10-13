@@ -62,8 +62,8 @@ layout(location = 3) out vec3 outLightVec;
 layout(location = 4) out vec3 outViewVec;
 layout(location = 5) out vec3 outNormal;
 layout(location = 6) out vec3 outTangent;
-
-//layout(location = 9) out mat3 TBN;
+layout(location = 7) out vec3 outLightPosition;
+layout(location = 8) out vec3 outPos;
 
 
 
@@ -89,4 +89,7 @@ void main() {
 
     outLightVec = ubo.lightPos.xyz - pos.xyz;
     outViewVec = ubo.cameraPos.xyz - pos.xyz;
+
+    outPos = pos.xyz;
+    outLightPosition = ubo.lightPos.xyz;
 }

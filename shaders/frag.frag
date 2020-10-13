@@ -32,35 +32,38 @@ layout(location = 3) in vec3 inLightVec;
 layout(location = 4) in vec3 inViewVec;
 layout(location = 5) in vec3 inNormal;
 layout(location = 6) in vec3 inTangent;
+layout(location = 7) in vec3 lightPosition;
+layout(location = 8) in vec3 pos;
+
+
+
 
 
 
 layout(location = 0) out vec4 outColor;
 #define M_PI 3.1415926535897932384626433832795
 
-vec3 BlinnPhong(vec3 normal, vec3 positon_worldspace, vec3 lightPosition_worldspace,
- vec3 lightDirection_tangentspace, vec3 eyeDirection_tangentspace,
- vec3 lightColor, vec3 diffuseColor, vec3 specularIntensity)
+const float ambient = 0.5;
+
+
+vec3 BlinnPhong(vec3 normal, vec3 diffuseColor, vec3 specularIntensity, vec3 lightColor, 
+	vec3 lightDirection, vec3 viewDirection, vec3 lightPosition, vec3 fragPos, float reflectance)
 {
-	vec3 lightDir = normalize(lightDirection_tangentspace);
-	float diff = clamp(dot(normal, lightDir), 0, 1);
+	vec3 L = normalize(lightDirection);
+	vec3 V = normalize(viewDirection);
+	vec3 R = reflect(-L, normal);
+	
+	vec3 diffuse = diffuseColor* max(dot(normal, L), 0.0).rrr;
+	vec3 specular = specularIntensity * pow(max(dot(R, V), 0.0), reflectance);
+	
+	float distance = length(lightPosition - fragPos) / 50;
 
-	float distance = length(lightPosition_worldspace - positon_worldspace);
-	vec3 diffuse = diff  * diffuseColor * lightColor;
-
-	// 
-	vec3 E = normalize(eyeDirection_tangentspace);
-
-	vec3 R = reflect(-lightDir, normal);
-	float spec = pow(clamp(dot(E, R), 0, 1), 32);
-	vec3 specular =  spec * specularIntensity * lightColor ;
-
-	float attenuation  =  0.1;//(1.0 /( 1.0 + 0.007 * distance + 0.0002 * (distance * distance)));
+	float attenuation  =  1.0 / distance;//( 1.0 + 0.007 * distance + 0.0002 * (distance * distance));
 
 	diffuse *= attenuation;
 	specular *= attenuation;
 
-	return diffuse;
+	return diffuse + specular;
 }
 
 void main() {
@@ -88,7 +91,6 @@ void main() {
 	}
 
 
-	const float ambient = 0.1;
 
 	vec3 specularIntensity;
 	if (md.roughnessTexture >= 0)
@@ -100,16 +102,10 @@ void main() {
 		specularIntensity = vec3(0.0);
 	}
 
-	vec3 L = normalize(inLightVec);
-	vec3 V = normalize(inViewVec);
-	vec3 R = reflect(-L, normal);
+	
 
-	vec3 diffuse = max(dot(normal, L), ambient).rrr;
-	vec3 specular = specularIntensity * pow(max(dot(R, V), 0.0), md.reflectance);
+	vec3 result = diffuseColor	* 0.1 + BlinnPhong(normal, diffuseColor, specularIntensity, vec3(0, 0, 0), 
+	inLightVec, inViewVec, lightPosition, pos, md.reflectance);
 
-	vec3 result = diffuse *  diffuseColor + specular;
-	// Gamma corrected
-	// result = pow(diffuseColor, vec3(1.0/2.2));
-	// result = normal;
     outColor = vec4(result, 1.0);
 }

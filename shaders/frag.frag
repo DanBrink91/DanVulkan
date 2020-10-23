@@ -43,7 +43,7 @@ layout(location = 8) in vec3 pos;
 layout(location = 0) out vec4 outColor;
 #define M_PI 3.1415926535897932384626433832795
 
-const float ambient = 0.5;
+const float ambient = 0.15;
 
 
 vec3 BlinnPhong(vec3 normal, vec3 diffuseColor, vec3 specularIntensity, vec3 lightColor, 
@@ -53,12 +53,12 @@ vec3 BlinnPhong(vec3 normal, vec3 diffuseColor, vec3 specularIntensity, vec3 lig
 	vec3 V = normalize(viewDirection);
 	vec3 R = reflect(-L, normal);
 	
-	vec3 diffuse = diffuseColor* max(dot(normal, L), 0.0).rrr;
-	vec3 specular = specularIntensity * pow(max(dot(R, V), 0.0), reflectance);
+	vec3 diffuse = lightColor * diffuseColor* max(dot(normal, L), ambient).rrr;
+	vec3 specular = lightColor * specularIntensity* pow(max(dot(R, V), 0.0), reflectance);
 	
-	float distance = length(lightPosition - fragPos) / 50;
+	float distance = length(lightPosition - fragPos) / 1000;
 
-	float attenuation  =  1.0 / distance;//( 1.0 + 0.007 * distance + 0.0002 * (distance * distance));
+	float attenuation  = 1.0 / distance;// / ( 1.0 + 0.007 * distance + 0.0002 * (distance * distance));
 
 	diffuse *= attenuation;
 	specular *= attenuation;
@@ -67,11 +67,12 @@ vec3 BlinnPhong(vec3 normal, vec3 diffuseColor, vec3 specularIntensity, vec3 lig
 }
 
 void main() {
-	vec3 lightColor = vec3(1);
+	vec3 lightColor = vec3(1, 1, 1);
 	float LightPower = 5;
 	
 	MaterialData md = mats[matID];
 	vec3 diffuseColor = texture(texSampler[md.albedoTexture], fragTexCoord).rgb;
+	
 	// Gamma correct
 	//diffuseColor = pow(diffuseColor, vec3(1.0/2.2));
 
@@ -83,11 +84,11 @@ void main() {
 		vec3 B = cross(inNormal, inTangent);
 		mat3 TBN = mat3(T, B, N);
 		normal = normalize(TBN *texture(texSampler[md.normalTexture], fragTexCoord).rgb * 2.0 - vec3(1.0));
-	 	// normal = vertNormal;
+	 	// normal = normalize(vertNormal);
 	}
 	else 
 	{
-		normal = vertNormal;
+		normal = normalize(vertNormal);
 	}
 
 
@@ -104,8 +105,9 @@ void main() {
 
 	
 
-	vec3 result = diffuseColor	* 0.1 + BlinnPhong(normal, diffuseColor, specularIntensity, vec3(0, 0, 0), 
+	vec3 result =  BlinnPhong(normal, diffuseColor, specularIntensity, lightColor, 
 	inLightVec, inViewVec, lightPosition, pos, md.reflectance);
 
     outColor = vec4(result, 1.0);
+
 }

@@ -191,6 +191,16 @@ std::vector<Texture> textures;
 VkBuffer vertexBuffer;
 VkDeviceMemory vertexBufferMemory;
 
+struct PointLight
+{
+    glm::vec3 position;
+    float power;
+    glm::vec3 color;
+    float unused0;
+};
+
+std::vector<PointLight> pointLights;
+
 struct QueueFamilyIndices {
     std::optional<uint32_t> graphicsFamily;
     std::optional<uint32_t> presentFamily;
@@ -368,15 +378,15 @@ private:
         // setup borderless full screen
         auto monitor = glfwGetPrimaryMonitor();
         const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-        /*
+
         glfwWindowHint(GLFW_RED_BITS, mode->redBits);
         glfwWindowHint(GLFW_GREEN_BITS, mode->greenBits);
         glfwWindowHint(GLFW_BLUE_BITS, mode->blueBits);
         glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
-        */
-        WIDTH = mode->width;
-        HEIGHT = mode->height;
-        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+
+        WIDTH = 1080;//mode->width;
+        HEIGHT = 720; // mode->height;
+        //glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
         // monitor to nullptr for windowed
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
         glfwSetWindowUserPointer(window, this);
@@ -466,11 +476,11 @@ private:
             // update title with performance
             double frameCpuEnd = glfwGetTime() * 1000;
             frameCpuAvg = frameCpuAvg * 0.95 + (frameCpuEnd - frameCpuBegin) * 0.05;
+            
+            double fps = 1000 / frameCpuAvg;
             char title[256];
-
-            sprintf(title, "DanVulkan cpu %.2f ms; gpu: %.2f ms", frameCpuAvg, frameGpuAvg);
+            sprintf(title, "DanVulkan cpu %.2f ms; gpu: %.2f ms, FPS: %.2f", frameCpuAvg, frameGpuAvg, fps);
             glfwSetWindowTitle(window, title);
-
         }
 
         vkDeviceWaitIdle(device);
@@ -577,8 +587,8 @@ private:
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 
         createGraphicsPipeline();
-        createColorResources();
-        createDepthResources();
+        //createColorResources();
+        //createDepthResources();
         createCommandBuffers();
 
     }
@@ -1605,8 +1615,9 @@ private:
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         uint32_t imageIndex;
+
+
         VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
-       
         // swapchain is incompoatible with surface and can't be used for rendering, usually after window resize
         if (result == VK_ERROR_OUT_OF_DATE_KHR)
         {
@@ -1618,17 +1629,9 @@ private:
             throw std::runtime_error("failed to acquire swap chain image!");
         }
 
-        // Check if a previous frame is using this image
-        if (imagesInFlight[imageIndex] != VK_NULL_HANDLE)
-        {
-            vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
-        }
-        // Mark the image as now being in use by this frame
-        imagesInFlight[imageIndex] = inFlightFences[currentFrame];
-
+        // possibly move these updates to above AcquireNextImage, have to keep track of / guess image index
         updateUniformBuffer(imageIndex);
         //drawIMGUI();
-         // Update command buffers?
         updateCommandBuffer(imageIndex);
 
         VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -1680,29 +1683,13 @@ private:
 
 
         frameGpuAvg = frameGpuAvg * 0.95 + (frameGpuEnd - frameGpuBegin) * 0.05;
-
     }
     
     void update()
     {
+        frames++;
         auto currentTime = std::chrono::high_resolution_clock::now();
         double dt = std::chrono::duration<double, std::milli>(currentTime - previousTime).count(); // Convert to miliseconds
-        
-        float fpsTimer = (float)std::chrono::duration<double, std::milli>(previousTime - lastTimeStamp).count();
-
-        frames++;
-        int frameHistorySize = (int)frameTimes.size();
-        frameTimes[frameIndex++] = dt ;
-        if (frameIndex >= frameTimes.size())
-        {
-            float total = 0.0f;
-            for (float frameTime : frameTimes)
-            {
-                total += frameTime;
-            }
-            averageFrameTime = total / frameHistorySize;
-            frameIndex = 0;
-        }
    
         /*
         ImGuiIO& io = ImGui::GetIO();
@@ -1741,25 +1728,19 @@ private:
             prevy = ypos;
       //  }
 
-        if (fpsTimer > 1000.0f)
-        {
-            fps = static_cast<uint32_t>((float)frames * (1000.0f / fpsTimer));
-            lastTimeStamp = previousTime;
-            frames = 0;
-        }
         
         previousTime = currentTime;
-        checkFilesChanged();
+        //checkFilesChanged();
     }
 #pragma endregion
     void updateUniformBuffer(uint32_t currentImage)
     {
-
+        /*
         static auto startTime = std::chrono::high_resolution_clock::now();
 
         auto currentTime = std::chrono::high_resolution_clock::now();
         float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
-        
+        */
         /*
         ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         ubo.view = glm::lookAt(glm::vec3(1.0f, 1.0f, 0.5f), glm::vec3(0.0f, 0.0f, 0.0f), glm::6vec3(0.0f, 0.0f, 1.0f));
@@ -1772,7 +1753,7 @@ private:
         UniformBufferObject ubo = {};
         ubo.view = camera.matrices.view; 
         ubo.proj = camera.matrices.perspective; 
-        ubo.time = time;
+        ubo.time = 1.0f;
         ubo.cameraPosition = camera.position;
         ubo.lightPos = lightPos;
   
@@ -1780,11 +1761,13 @@ private:
             lightSpeed.x *= -1;
         lightPos += lightSpeed;
         
+
         // Update to GPU
+        // NOTE: this is a hot area for code performance
         // UBO
         void* data;
         vkMapMemory(device, uniformBuffersMemory[currentImage], 0, sizeof(ubo), 0, &data);
-            memcpy(data, &ubo, sizeof(ubo));
+        memcpy(data, &ubo, sizeof(ubo));
         vkUnmapMemory(device, uniformBuffersMemory[currentImage]);
 
         // Verticies
@@ -1795,6 +1778,7 @@ private:
         memcpy(materialDataPointers[currentImage], matData.data(), sizeof(MaterialData) * matData.size());
         // Draw Data
         memcpy(drawDataPointers[currentImage], drawData.data(), sizeof(DrawData) * drawData.size());
+       
     }
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory)
@@ -2589,6 +2573,11 @@ private:
         lightPos = glm::vec3(-100.f, -150.0f, 65.f);
         lightSpeed = glm::vec3(1.5, 0, 0);
 
+        PointLight pl;
+        pl.position = lightPos;
+        pl.power = 1.0f;
+        pl.color = glm::vec3(1.0f, 1.0f, 1.0f);
+        pointLights.push_back(pl);
         /* lion head spots
         DrawData lion1 = drawData[375], lion2 = drawData[376];
         Vertex v1 = vertices[lion1.vertexOffset];

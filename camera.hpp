@@ -40,6 +40,30 @@ class Camera
 			viewPos = glm::vec4(position, 0.0f) * glm::vec4(-1.0f, 1.0f, -1.0f, 1.0f);
 
 			updated = true;
+
+			glm::mat4 viewProj =  glm::transpose(matrices.perspective * matrices.view);
+
+			planes[0] = viewProj[3] + viewProj[0];
+			// right
+			planes[1] = viewProj[3] - viewProj[0];
+			// top
+			planes[2] = viewProj[3] - viewProj[1];
+			// bottom
+			planes[3] = viewProj[3] + viewProj[1];
+			// near
+			planes[4] = viewProj[3] + viewProj[2];
+			// far
+			planes[5] = viewProj[3] - viewProj[2];
+
+			for (int i = 0; i < 6; i++)
+			{
+				float length = sqrt((planes[i].x * planes[i].x) + (planes[i].y * planes[i].y) + (planes[i].z * planes[i].z));
+				planes[i].x /= length;
+				planes[i].y /= length;
+				planes[i].z /= length;
+				planes[i].w /= length;
+			}
+
 		}
 	
 	public:
@@ -54,6 +78,8 @@ class Camera
 
 		bool updated = false;
 		bool flipY = false;
+		// frustum planes
+		glm::vec4 planes[6];
 
 		struct
 		{

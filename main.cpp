@@ -56,6 +56,16 @@ struct DrawData
     // Gameplay data?
 };
 
+struct MeshData
+{
+    uint32_t indexCount;
+    uint32_t firstIndex;
+    uint32_t vertexOffset;
+    DrawData drawData;
+};
+
+
+
 struct MaterialData
 {
     glm::vec4 albedoTint;
@@ -166,13 +176,20 @@ struct UniformBufferObject {
     float unused02;
 };
 
+struct AABB {
+    glm::vec3 minVertex;
+    glm::vec3 maxVertex;
+};
+
 std::vector<Vertex> vertices;
 std::vector<uint32_t> indices;
 std::vector<MaterialData> matData;
 std::vector<TransformData> transformData;
 std::vector<DrawData> drawData;
+std::vector<MeshData> meshData;
+std::vector<AABB> aabbs;
 
-std::vector<void*> vertexDataPointers, materialDataPointers, transformDataPointers, drawDataPointers;
+std::vector<void*> vertexDataPointers, materialDataPointers, transformDataPointers, drawDataPointers, indirectCommandsPointers;
 
 std::vector<VkDrawIndexedIndirectCommand> indirectCommands;
 std::vector<VkBuffer> indirectCommandsBuffer;
@@ -1026,7 +1043,7 @@ private:
         vertexInputInfo.pVertexAttributeDescriptions = nullptr; // attributeDescriptions.data();
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.topology =  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         inputAssembly.primitiveRestartEnable = VK_FALSE;
 
         VkViewport viewport = {};
@@ -1573,7 +1590,7 @@ private:
         vkCmdBindDescriptorSets(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1,
             &descriptorSets[imageIndex], 0, nullptr);
 
-        vkCmdDrawIndexedIndirect(commandBuffers[imageIndex], indirectCommandsBuffer[0], 0, (uint32_t)indirectCommands.size(), sizeof(VkDrawIndexedIndirectCommand));
+        vkCmdDrawIndexedIndirect(commandBuffers[imageIndex], indirectCommandsBuffer[imageIndex], 0, (uint32_t)indirectCommands.size(), sizeof(VkDrawIndexedIndirectCommand));
         //vkCmdDrawIndexed(commandBuffers[imageIndex], static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
 
         //ImGui_ImplVulkan_RenderDrawData(imguiDrawData, commandBuffers[imageIndex]);
@@ -1761,6 +1778,7 @@ private:
             lightSpeed.x *= -1;
         lightPos += lightSpeed;
         
+        cullAABB(currentImage);
 
         // Update to GPU
         // NOTE: this is a hot area for code performance
@@ -1778,7 +1796,66 @@ private:
         memcpy(materialDataPointers[currentImage], matData.data(), sizeof(MaterialData) * matData.size());
         // Draw Data
         memcpy(drawDataPointers[currentImage], drawData.data(), sizeof(DrawData) * drawData.size());
-       
+        // indirect
+        memcpy(indirectCommandsPointers[currentImage], indirectCommands.data(), sizeof(VkDrawIndexedIndirectCommand) * indirectCommands.size());
+    }
+
+    void cullAABB(uint32_t currentImage)
+    {
+        drawData.clear();
+        indirectCommands.clear();
+        int culledObjects = 0;
+        int drawnObjects = 0;
+        for (int i = 0; i < aabbs.size(); i++)
+        {
+            bool cull = false;
+            for (int planeID = 0; planeID < 6; ++planeID)
+            {
+                glm::vec3 planeNormal = camera.planes[planeID]; // might vec4?
+                float planeConstant = camera.planes[planeID].w;
+                // check each axis to get the AABB vertex further away from the direction plane is facing (plane normal)
+                glm::vec3 axisVert;
+
+                // add position to the aabb here, we're all 0 here tho.
+                if (planeNormal.x < 0.0f)
+                    axisVert.x = aabbs[i].minVertex.x;
+                else
+                    axisVert.x = aabbs[i].maxVertex.x;
+
+                if (planeNormal.y < 0.0)
+                    axisVert.y = aabbs[i].minVertex.y;
+                else
+                    axisVert.y = aabbs[i].maxVertex.y;
+                
+                if (planeNormal.z < 0.0)
+                    axisVert.z = aabbs[i].minVertex.z;
+                else
+                    axisVert.z = aabbs[i].maxVertex.z;
+
+                if (glm::dot(planeNormal, axisVert) + planeConstant < 0.0f)
+                {
+                    culledObjects++;
+                    cull = true;
+                    break;
+                }
+            }
+            if (!cull)
+            {
+                drawnObjects++;
+                
+                MeshData md = meshData[i];
+
+                VkDrawIndexedIndirectCommand cmd;                
+                cmd.indexCount = md.indexCount;
+                cmd.firstIndex = md.firstIndex;
+                cmd.firstInstance = 0;
+                cmd.instanceCount = 1;
+                cmd.vertexOffset = md.vertexOffset;
+                indirectCommands.push_back(cmd);
+                
+                drawData.push_back(md.drawData);
+            }
+        }
     }
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory)
@@ -1873,12 +1950,14 @@ private:
 
         indirectCommandsBuffer.resize(swapChainImages.size());
         indirectCommandsBufferMemory.resize(swapChainImages.size());
+        indirectCommandsPointers.resize(swapChainImages.size());
 
         // TODO: Pick a size for these, the size of the vector WILL change
         VkDeviceSize matBufferSize = sizeof(MaterialData) * matData.size();
         VkDeviceSize transformBufferSize = sizeof(TransformData) * TransformDataCount;
         VkDeviceSize drawBufferSize = sizeof(DrawData) * drawData.size();
         VkDeviceSize vertexBufferSize = sizeof(vertices[0]) * vertices.size();
+        VkDeviceSize indirectBufferSize = sizeof(VkDrawIndexedIndirectCommand) * 2048;
 
         for (size_t i = 0; i < swapChainImages.size(); i++)
         {
@@ -1897,19 +1976,25 @@ private:
             // Verticies
             createBuffer(vertexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 vertexBuffers[i], vertexBuffersMemory[i]);
+            
+            // Indirect Draw
+            createBuffer(indirectBufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                indirectCommandsBuffer[i], indirectCommandsBufferMemory[i]);
 
             vkMapMemory(device, matBuffersMemory[i], 0, sizeof(MaterialData) * matData.size(), 0, &materialDataPointers[i]);
             vkMapMemory(device, transformBuffersMemory[i], 0, sizeof(TransformData) * transformData.size(), 0, &transformDataPointers[i]);
             vkMapMemory(device, drawBuffersMemory[i], 0, sizeof(DrawData) * drawData.size(), 0, &drawDataPointers[i]);
             vkMapMemory(device, vertexBuffersMemory[i], 0, sizeof(Vertex) * vertices.size(), 0, &vertexDataPointers[i]);
+          vkMapMemory(device, indirectCommandsBufferMemory[i], 0, sizeof(VkDrawIndexedIndirectCommand) * 2048, 0, &indirectCommandsPointers[i]);
+
         }
 
     }
 
     void updateIndirectBuffer()
     {
-        VkDeviceSize bufferSize = sizeof(VkDrawIndexedIndirectCommand) * indirectCommands.size();
-        createDeviceLocalBuffer(bufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, indirectCommandsBuffer[0], indirectCommandsBufferMemory[0], indirectCommands.data());
+       // VkDeviceSize bufferSize = sizeof(VkDrawIndexedIndirectCommand) * indirectCommands.size();
+        //createDeviceLocalBuffer(bufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, indirectCommandsBuffer[0], indirectCommandsBufferMemory[0], indirectCommands.data());
     }
 
     void createDescriptorSetLayout()
@@ -2260,6 +2345,8 @@ private:
             throw std::runtime_error(warn + err);
         }
 
+        float MAX = std::numeric_limits<float>::max();
+
         std::unordered_map<Vertex, uint32_t> uniqueVerticies{};
         //std::cout << warn << std::endl;
         TransformData td{ };
@@ -2321,8 +2408,15 @@ private:
             dd.transformIndex =  0;
             dd.unused = 0;
             dd.vertexOffset = (uint32_t)vertices.size();
-            drawData.push_back(dd);
             
+            drawData.push_back(dd);
+            MeshData md;
+            md.indexCount = uint32_t(shape.mesh.indices.size());
+            md.firstIndex = uint32_t(indices.size());
+            md.vertexOffset = 0;
+            md.drawData = dd;
+            meshData.push_back(md);
+            /*
             VkDrawIndexedIndirectCommand cmd;
             cmd.indexCount = uint32_t(shape.mesh.indices.size());
             cmd.instanceCount = 1;
@@ -2330,6 +2424,11 @@ private:
             cmd.vertexOffset = 0;
             cmd.firstInstance = 0;
             indirectCommands.push_back(cmd);
+            */
+            
+            AABB aabb;
+            aabb.minVertex = glm::vec3(MAX, MAX, MAX);
+            aabb.maxVertex = glm::vec3(-MAX, -MAX, -MAX);
 
             int j = 0;
             for (const auto& index : shape.mesh.indices)
@@ -2342,6 +2441,15 @@ private:
                     attrib.vertices[3 * (int)index.vertex_index + 1],
                     attrib.vertices[3 * (int)index.vertex_index + 2]
                 };
+
+                aabb.minVertex.x = std::min(aabb.minVertex.x, vertex.pos.x);
+                aabb.minVertex.y = std::min(aabb.minVertex.y, vertex.pos.y);
+                aabb.minVertex.z = std::min(aabb.minVertex.z, vertex.pos.z);
+
+                aabb.maxVertex.x = std::max(aabb.maxVertex.x, vertex.pos.x);
+                aabb.maxVertex.y = std::max(aabb.maxVertex.y, vertex.pos.y);
+                aabb.maxVertex.z = std::max(aabb.maxVertex.z, vertex.pos.z);
+
                 
                 vertex.normal = {
                     attrib.normals[3 * (int)index.normal_index + 0],
@@ -2374,6 +2482,7 @@ private:
                 }
             }
             indexCounter++;
+            aabbs.push_back(aabb);
 
         }
         for (int i = 0; i < vertices.size(); i+=3)

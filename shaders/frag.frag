@@ -1,6 +1,7 @@
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_ARB_shader_group_vote : enable
 
 
 layout(binding = 5) uniform sampler2D texSampler[];
@@ -77,7 +78,9 @@ void main() {
 	//diffuseColor = pow(diffuseColor, vec3(1.0/2.2));
 
 	vec3 normal;
-	if (md.normalTexture >= 0)
+	bool useBump = md.normalTexture >= 0;
+	//useBump = allInvocationsARB(useBump);
+	if (useBump)
 	{
 		vec3 N = normalize(inNormal);
 		vec3 T = normalize(inTangent);

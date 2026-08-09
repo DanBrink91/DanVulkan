@@ -1,0 +1,42 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: configure",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--preset", "windows"],
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: build (Debug)",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "--preset", "debug"],
+      "dependsOn": "CMake: configure",
+      "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "DanVulkan: run",
+      "type": "shell",
+      "command": "${workspaceFolder}\\build\\windows\\Debug\\DanVulkan.exe",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "CMake: build (Debug)",
+      "problemMatcher": []
+    },
+    {
+      "label": "DanVulkan: validation tests",
+      "type": "shell",
+      "command": "ctest",
+      "args": ["--preset", "debug"],
+      "dependsOn": "CMake: build (Debug)",
+      "problemMatcher": []
+    }
+  ]
+}

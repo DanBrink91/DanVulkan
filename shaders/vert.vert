@@ -1,36 +1,34 @@
-#version 450
-#extension GL_ARB_separate_shader_objects : enable
-#extension GL_ARB_shader_draw_parameters : enable
+#version 460
+#extension GL_ARB_shader_draw_parameters : require
 
-
-layout(binding = 0) uniform UniformBufferObject {
-	mat4 view;
-	mat4 proj;
-	float time;
-	vec3 cameraPos;
-    vec3 lightPos;
-    float unused0;
-    vec4 unused1;
+layout(set = 0, binding = 0) uniform UniformBufferObject
+{
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPositionTime;
+    vec4 lightPosition;
 } ubo;
 
-struct Vertex 
+struct Vertex
 {
-    vec3 pos;
+    vec3 position;
     float unused0;
     vec3 normal;
-    float unused01;
+    float unused1;
     vec3 color;
-    float unused02;
+    float unused2;
     vec2 texCoord;
-    float unused03;
-    float unused04;
+    float unused3;
+    float unused4;
     vec3 tangent;
-    float unused05;
+    float tangentSign;
+    uvec4 joints;
+    vec4 weights;
 };
 
-layout(set = 0, binding = 4) readonly buffer Verticies 
+layout(set = 0, binding = 4) readonly buffer Vertices
 {
-    Vertex verticies[];
+    Vertex vertices[];
 };
 
 struct TransformData
@@ -43,53 +41,56 @@ layout(set = 0, binding = 3) readonly buffer Transforms
     TransformData transforms[];
 };
 
+layout(set = 0, binding = 6) readonly buffer JointMatrices
+{
+    mat4 jointMatrices[];
+};
+
 struct DrawData
 {
-    int materialIndex; // Index into material buffer
-    int transformIndex; // Index into transform buffer
-    int vertexOffset; // used to lookup attributes in vertex storage buffer
-    int unused; // vec4 padding
+    int materialIndex;
+    int transformIndex;
+    int vertexOffset;
+    int jointOffset;
 };
+
 layout(set = 0, binding = 2) readonly buffer Draws
 {
-    DrawData drawData[];
+    DrawData draws[];
 };
 
-layout(location = 0) out vec3 vertNormal;
-layout(location = 1) out vec2 fragTexCoord;
-layout(location = 2) out int matID;
-layout(location = 3) out vec3 outLightVec;
-layout(location = 4) out vec3 outViewVec;
-layout(location = 5) out vec3 outNormal;
-layout(location = 6) out vec3 outTangent;
-layout(location = 7) out vec3 outLightPosition;
-layout(location = 8) out vec3 outPos;
+layout(location = 0) out vec2 outTexCoord;
+layout(location = 1) flat out int outMaterialIndex;
+layout(location = 2) out vec3 outWorldNormal;
+layout(location = 3) out vec4 outWorldTangent;
+layout(location = 4) out vec3 outWorldPosition;
 
+void main()
+{
+    DrawData draw = draws[gl_BaseInstance];
+    Vertex vertex = vertices[gl_VertexIndex];
+    mat4 model = transforms[draw.transformIndex].model;
+    vec3 position = vertex.position;
+    vec3 normal = vertex.normal;
+    vec3 tangent = vertex.tangent;
+    if (draw.jointOffset >= 0)
+    {
+        mat4 skin = vertex.weights.x * jointMatrices[draw.jointOffset + int(vertex.joints.x)] +
+            vertex.weights.y * jointMatrices[draw.jointOffset + int(vertex.joints.y)] +
+            vertex.weights.z * jointMatrices[draw.jointOffset + int(vertex.joints.z)] +
+            vertex.weights.w * jointMatrices[draw.jointOffset + int(vertex.joints.w)];
+        position = (skin * vec4(position, 1.0)).xyz;
+        normal = mat3(skin) * normal;
+        tangent = mat3(skin) * tangent;
+    }
+    vec4 worldPosition = model * vec4(position, 1.0);
+    mat3 normalMatrix = transpose(inverse(mat3(model)));
 
-
-
-void main() {
-    int drawID = gl_VertexIndex;
-    DrawData d = drawData[gl_DrawIDARB];
-
-    Vertex vert = verticies[gl_VertexIndex];
-    TransformData t = transforms[d.transformIndex];
-
-    vec4 positionLocal = vec4(vert.pos, 1.0);
-    gl_Position =  (ubo.proj * ubo.view * t.model * positionLocal);
-
-
-    fragTexCoord = vert.texCoord;
-    vertNormal = vert.normal;
-    matID = d.materialIndex;
-
-    outTangent = ( t.model * vec4(vert.tangent, 1.0)).xyz;;
-    outNormal = (t.model * vec4(vert.normal, 1.0)).xyz;
-    vec4 pos = t.model * positionLocal;
-
-    outLightVec = ubo.lightPos.xyz - pos.xyz;
-    outViewVec = ubo.cameraPos.xyz - pos.xyz;
-
-    outPos = pos.xyz;
-    outLightPosition = ubo.lightPos.xyz;
+    gl_Position = ubo.projection * ubo.view * worldPosition;
+    outTexCoord = vertex.texCoord;
+    outMaterialIndex = draw.materialIndex;
+    outWorldNormal = normalize(normalMatrix * normal);
+    outWorldTangent = vec4(normalize(mat3(model) * tangent),
+        vertex.tangentSign * sign(determinant(mat3(model))));
+    outWorldPosition = worldPosition.xyz;
 }

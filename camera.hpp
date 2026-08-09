@@ -1,7 +1,15 @@
 
+#pragma once
+
 // Slightly modified version of https://github.com/SaschaWillems/Vulkan camera class
+#ifndef GLM_FORCE_RADIANS
 #define GLM_FORCE_RADIANS
+#endif
+#ifndef GLM_FORCE_DEPTH_ZERO_TO_ONE
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#endif
+
+#include <cmath>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -108,14 +116,14 @@ class Camera
 			return zfar;
 		}
 
-		void setPerspective(float fov, float aspect, float znear, float zfar)
+		void setPerspective(float fieldOfView, float aspect, float nearClip, float farClip)
 		{
-			this->fov = fov;
-			this->znear = znear;
-			this->zfar = zfar;
-			matrices.perspective = glm::perspective(glm::radians(fov), aspect, znear, zfar);
+			fov = fieldOfView;
+			znear = nearClip;
+			zfar = farClip;
+			matrices.perspective = glm::perspective(glm::radians(fieldOfView), aspect, nearClip, farClip);
 			if (flipY) {
-				matrices.perspective[1, 1] *= -1.0f;
+				matrices.perspective[1][1] *= -1.0f;
 			}
 		};
 
@@ -123,25 +131,26 @@ class Camera
 		{
 			matrices.perspective = glm::perspective(glm::radians(fov), aspect, znear, zfar);
 			if (flipY) {
-				matrices.perspective[1, 1] *= -1.0f;
+				matrices.perspective[1][1] *= -1.0f;
 			}
 		}
 
-		void setPosition(glm::vec3 position)
+		void setPosition(glm::vec3 newPosition)
 		{
-			this->position = position;
+			position = newPosition;
 			updateViewMatrix();
 		}
 
-		void setRotation(glm::vec3 rotation)
+		void setRotation(glm::vec3 newRotation)
 		{
-			this->rotation = rotation;
+			rotation = newRotation;
 			updateViewMatrix();
 		}
 
 		void rotate(glm::vec3 delta)
 		{
 			this->rotation += delta;
+			this->rotation.x = glm::clamp(this->rotation.x, -89.0f, 89.0f);
 			updateViewMatrix();
 		}
 
@@ -157,14 +166,14 @@ class Camera
 			updateViewMatrix();
 		}
 
-		void setRotationSpeed(float rotationSpeed)
+		void setRotationSpeed(float speed)
 		{
-			this->rotationSpeed = rotationSpeed;
+			rotationSpeed = speed;
 		}
 
-		void setMovementSpeed(float movementSpeed)
+		void setMovementSpeed(float speed)
 		{
-			this->movementSpeed = movementSpeed;
+			movementSpeed = speed;
 		}
 
 		void update(float deltaTime)

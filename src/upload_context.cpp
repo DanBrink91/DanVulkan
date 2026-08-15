@@ -1,5 +1,6 @@
 #include "upload_context.hpp"
 
+#include "memory_planner.hpp"
 #include "vulkan_result.hpp"
 
 #include <algorithm>
@@ -71,6 +72,7 @@ void UploadContext::initialize(VkDevice device, VmaAllocator allocator, VkQueue 
 
 void UploadContext::reset() noexcept
 {
+    staging_.reset();
     if (device_ != VK_NULL_HANDLE)
     {
         if (fence_ != VK_NULL_HANDLE)
@@ -89,6 +91,8 @@ void UploadContext::reset() noexcept
     queue_ = VK_NULL_HANDLE;
     allocator_ = VK_NULL_HANDLE;
     device_ = VK_NULL_HANDLE;
+    arenaGrowthCount_ = 0;
+    uploadCount_ = 0;
     enableDebugNames_ = false;
 }
 
@@ -101,13 +105,13 @@ void UploadContext::uploadBuffer(VkBuffer destination, VkDeviceSize destinationO
         throw std::invalid_argument("buffer upload requires a destination and non-empty data");
     }
 
-    Buffer staging = createStagingBuffer(data, size, std::string(name) + " staging");
+    writeStaging(data, size, name);
     VkCommandBuffer commandBuffer = beginCommands();
 
     VkBufferCopy copyRegion{};
     copyRegion.dstOffset = destinationOffset;
     copyRegion.size = size;
-    vkCmdCopyBuffer(commandBuffer, staging, destination, 1, &copyRegion);
+    vkCmdCopyBuffer(commandBuffer, staging_, destination, 1, &copyRegion);
 
     VkBufferMemoryBarrier2 barrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
@@ -149,6 +153,7 @@ void UploadContext::uploadBuffer(VkBuffer destination, VkDeviceSize destinationO
     vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
 
     submitAndWait(commandBuffer);
+    ++uploadCount_;
 }
 
 void UploadContext::uploadImage(VkImage destination, std::uint32_t width,
@@ -163,7 +168,7 @@ void UploadContext::uploadImage(VkImage destination, std::uint32_t width,
         throw std::invalid_argument("image upload requires a destination and non-empty pixels");
     }
 
-    Buffer staging = createStagingBuffer(rgba8, size, std::string(name) + " staging");
+    writeStaging(rgba8, size, name);
     VkCommandBuffer commandBuffer = beginCommands();
 
     transitionImage(commandBuffer, destination, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -176,7 +181,7 @@ void UploadContext::uploadImage(VkImage destination, std::uint32_t width,
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount = 1;
     region.imageExtent = { width, height, 1 };
-    vkCmdCopyBufferToImage(commandBuffer, staging, destination,
+    vkCmdCopyBufferToImage(commandBuffer, staging_, destination,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     std::int32_t mipWidth = static_cast<std::int32_t>(width);
@@ -216,18 +221,92 @@ void UploadContext::uploadImage(VkImage destination, std::uint32_t width,
         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, mipLevels - 1, 1);
 
     submitAndWait(commandBuffer);
+    ++uploadCount_;
 }
 
-Buffer UploadContext::createStagingBuffer(
-    const void* data, VkDeviceSize size, std::string_view name) const
+void UploadContext::copyBuffer(VkBuffer source, VkBuffer destination, VkDeviceSize size,
+    VkBufferUsageFlags destinationUsage, std::string_view name)
+{
+    if (source == VK_NULL_HANDLE || destination == VK_NULL_HANDLE || size == 0)
+    {
+        throw std::invalid_argument("buffer copy requires two buffers and a non-zero size");
+    }
+
+    VkCommandBuffer commandBuffer = beginCommands();
+    const VkBufferCopy copyRegion{0, 0, size};
+    vkCmdCopyBuffer(commandBuffer, source, destination, 1, &copyRegion);
+
+    VkBufferMemoryBarrier2 barrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+    barrier.dstAccessMask = VK_ACCESS_2_NONE;
+    if ((destinationUsage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) != 0)
+    {
+        barrier.dstStageMask |= VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT;
+        barrier.dstAccessMask |= VK_ACCESS_2_INDEX_READ_BIT;
+    }
+    if ((destinationUsage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) != 0)
+    {
+        barrier.dstStageMask |= VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT;
+        barrier.dstAccessMask |= VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+    }
+    if ((destinationUsage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0)
+    {
+        barrier.dstStageMask |= VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+        barrier.dstAccessMask |= VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    }
+    if (barrier.dstStageMask == VK_PIPELINE_STAGE_2_NONE)
+    {
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+    }
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = destination;
+    barrier.size = size;
+
+    VkDependencyInfo dependencyInfo{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    dependencyInfo.bufferMemoryBarrierCount = 1;
+    dependencyInfo.pBufferMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+    submitAndWait(commandBuffer);
+    ++uploadCount_;
+    static_cast<void>(name);
+}
+
+void UploadContext::writeStaging(
+    const void* data, VkDeviceSize size, std::string_view name)
+{
+    ensureStagingCapacity(size, name);
+    if (staging_.mapped() == nullptr)
+    {
+        throw std::runtime_error("upload staging arena was not mapped");
+    }
+    std::memcpy(staging_.mapped(), data, static_cast<std::size_t>(size));
+    check(staging_.flush(0, size), "vmaFlushAllocation(upload staging arena)");
+}
+
+void UploadContext::ensureStagingCapacity(VkDeviceSize requiredSize, std::string_view name)
 {
     if (device_ == VK_NULL_HANDLE || allocator_ == VK_NULL_HANDLE || queue_ == VK_NULL_HANDLE)
     {
         throw std::logic_error("upload context is not initialized");
     }
 
+    if (requiredSize <= staging_.size())
+    {
+        return;
+    }
+    const std::optional<std::uint64_t> capacity = planArenaCapacity(
+        staging_.size(), requiredSize);
+    if (!capacity)
+    {
+        throw std::overflow_error("upload staging arena capacity overflowed");
+    }
+
     VkBufferCreateInfo bufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-    bufferInfo.size = size;
+    bufferInfo.size = static_cast<VkDeviceSize>(*capacity);
     bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -245,18 +324,17 @@ Buffer UploadContext::createStagingBuffer(
               &resultInfo),
         "vmaCreateBuffer(upload staging)");
 
-    Buffer staging(allocator_, buffer, allocation, resultInfo.pMappedData, size);
-    if (staging.mapped() == nullptr)
+    Buffer replacement(allocator_, buffer, allocation, resultInfo.pMappedData, bufferInfo.size);
+    if (replacement.mapped() == nullptr)
     {
-        throw std::runtime_error("upload staging buffer was not mapped");
+        throw std::runtime_error("upload staging arena was not mapped");
     }
-    std::memcpy(staging.mapped(), data, static_cast<std::size_t>(size));
-    check(staging.flush(0, size), "vmaFlushAllocation(upload staging)");
 
-    const std::string terminatedName(name);
+    const std::string terminatedName = std::string(name) + " staging arena";
     vmaSetAllocationName(allocator_, allocation, terminatedName.c_str());
-    setDebugName(VK_OBJECT_TYPE_BUFFER, handleValue(buffer), name);
-    return staging;
+    setDebugName(VK_OBJECT_TYPE_BUFFER, handleValue(buffer), terminatedName);
+    staging_ = std::move(replacement);
+    ++arenaGrowthCount_;
 }
 
 VkCommandBuffer UploadContext::beginCommands()

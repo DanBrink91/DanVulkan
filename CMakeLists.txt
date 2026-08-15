@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(DanVulkan VERSION 0.26.0 LANGUAGES C CXX)
+project(DanVulkan VERSION 0.29.0 LANGUAGES C CXX)
 
 include(CTest)
 include(FetchContent)
@@ -107,6 +107,8 @@ target_link_libraries(danvulkan_assets PUBLIC glm::glm PRIVATE tinyobjloader fas
 add_library(danvulkan_renderer STATIC
     src/animation_player.cpp
     src/animation_player.hpp
+    src/attachment_context.cpp
+    src/attachment_context.hpp
     src/descriptor_context.cpp
     src/descriptor_context.hpp
     src/descriptor_planner.cpp
@@ -115,9 +117,23 @@ add_library(danvulkan_renderer STATIC
     src/device_context.hpp
     src/device_planner.cpp
     src/device_planner.hpp
+    src/frame_context.cpp
+    src/frame_context.hpp
     src/glfw_platform.cpp
     src/glfw_platform.hpp
+    src/memory_planner.cpp
+    src/memory_planner.hpp
+    src/pipeline_context.cpp
+    src/pipeline_context.hpp
+    src/pipeline_planner.cpp
+    src/pipeline_planner.hpp
+    src/presentation_context.cpp
+    src/presentation_context.hpp
     src/renderer.cpp
+    src/scene_context.cpp
+    src/scene_context.hpp
+    src/scene_planner.cpp
+    src/scene_planner.hpp
     src/swapchain_context.cpp
     src/swapchain_context.hpp
     src/swapchain_planner.cpp
@@ -197,6 +213,19 @@ if(BUILD_TESTING)
         tests/swapchain_planner_tests.cpp
         src/swapchain_planner.cpp
     )
+    add_executable(danvulkan_pipeline_planner_tests
+        tests/pipeline_planner_tests.cpp
+        src/pipeline_planner.cpp
+    )
+    add_executable(danvulkan_memory_planner_tests
+        tests/memory_planner_tests.cpp
+        src/memory_planner.cpp
+    )
+    add_executable(danvulkan_scene_planner_tests
+        tests/scene_planner_tests.cpp
+        src/scene_planner.cpp
+    )
+    add_executable(danvulkan_scene_context_tests tests/scene_context_tests.cpp)
     target_include_directories(danvulkan_device_planner_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_features(danvulkan_device_planner_tests PRIVATE cxx_std_20)
     target_include_directories(danvulkan_descriptor_planner_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -205,18 +234,39 @@ if(BUILD_TESTING)
     target_include_directories(danvulkan_swapchain_planner_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_features(danvulkan_swapchain_planner_tests PRIVATE cxx_std_20)
     target_link_libraries(danvulkan_swapchain_planner_tests PRIVATE Vulkan::Vulkan)
+    target_include_directories(danvulkan_pipeline_planner_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_features(danvulkan_pipeline_planner_tests PRIVATE cxx_std_20)
+    target_link_libraries(danvulkan_pipeline_planner_tests PRIVATE Vulkan::Vulkan)
+    target_include_directories(danvulkan_memory_planner_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_features(danvulkan_memory_planner_tests PRIVATE cxx_std_20)
+    target_link_libraries(danvulkan_memory_planner_tests PRIVATE Vulkan::Vulkan)
+    target_include_directories(danvulkan_scene_planner_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_features(danvulkan_scene_planner_tests PRIVATE cxx_std_20)
+    target_link_libraries(danvulkan_scene_planner_tests PRIVATE DanVulkan::Assets glm::glm)
+    target_include_directories(danvulkan_scene_context_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_features(danvulkan_scene_context_tests PRIVATE cxx_std_20)
+    target_link_libraries(danvulkan_scene_context_tests PRIVATE
+        DanVulkan::Renderer GPUOpen::VulkanMemoryAllocator)
     if(MSVC)
         target_compile_options(danvulkan_asset_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_animation_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_device_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_descriptor_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_swapchain_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
+        target_compile_options(danvulkan_pipeline_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
+        target_compile_options(danvulkan_memory_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
+        target_compile_options(danvulkan_scene_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
+        target_compile_options(danvulkan_scene_context_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
     else()
         target_compile_options(danvulkan_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_animation_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_device_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_descriptor_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_swapchain_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(danvulkan_pipeline_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(danvulkan_memory_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(danvulkan_scene_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(danvulkan_scene_context_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
     add_test(NAME danvulkan_assets_import COMMAND danvulkan_asset_tests)
@@ -224,16 +274,28 @@ if(BUILD_TESTING)
     add_test(NAME danvulkan_device_planning COMMAND danvulkan_device_planner_tests)
     add_test(NAME danvulkan_descriptor_planning COMMAND danvulkan_descriptor_planner_tests)
     add_test(NAME danvulkan_swapchain_planning COMMAND danvulkan_swapchain_planner_tests)
+    add_test(NAME danvulkan_pipeline_planning COMMAND danvulkan_pipeline_planner_tests)
+    add_test(NAME danvulkan_memory_planning COMMAND danvulkan_memory_planner_tests)
+    add_test(NAME danvulkan_scene_planning COMMAND danvulkan_scene_planner_tests)
+    add_test(NAME danvulkan_scene_context COMMAND danvulkan_scene_context_tests)
     add_test(NAME danvulkan_validation_smoke COMMAND DanVulkan --smoke-test)
     add_test(NAME danvulkan_validation_platform COMMAND DanVulkan --platform-smoke-test)
     add_test(NAME danvulkan_validation_step COMMAND DanVulkan --step-smoke-test)
     add_test(NAME danvulkan_validation_resize COMMAND DanVulkan --resize-smoke-test)
+    add_test(NAME danvulkan_validation_minimize COMMAND DanVulkan --minimize-smoke-test)
+    add_test(NAME danvulkan_animated_stress COMMAND DanVulkan --animated-stress-test)
     set_tests_properties(
         danvulkan_assets_import danvulkan_animation_playback danvulkan_device_planning
         danvulkan_descriptor_planning
         danvulkan_swapchain_planning
+        danvulkan_pipeline_planning
+        danvulkan_memory_planning
+        danvulkan_scene_planning
+        danvulkan_scene_context
         danvulkan_validation_smoke danvulkan_validation_platform
-        danvulkan_validation_step danvulkan_validation_resize
+        danvulkan_validation_step danvulkan_validation_resize danvulkan_validation_minimize
+        danvulkan_animated_stress
         PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     )
+    set_tests_properties(danvulkan_animated_stress PROPERTIES LABELS stress TIMEOUT 180)
 endif()

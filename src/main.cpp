@@ -1,15 +1,178 @@
 #include <danvulkan/renderer.hpp>
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
 
 #include <glm/gtc/matrix_transform.hpp>
+
+namespace
+{
+// Deterministically exercises the host-platform contract used during minimization. The native
+// surface stays valid while the adapter reports a zero framebuffer until waitEvents restores it.
+class MinimizeRestorePlatform final : public RendererPlatform
+{
+public:
+    explicit MinimizeRestorePlatform(std::shared_ptr<RendererPlatform> delegate)
+        : delegate_(std::move(delegate))
+    {
+    }
+
+    bool shouldClose() const noexcept override { return delegate_->shouldClose(); }
+    void pollEvents() override { delegate_->pollEvents(); }
+    void waitEvents() override
+    {
+        if (minimized_)
+        {
+            delegate_->pollEvents();
+            minimized_ = false;
+            framebufferResized_ = true;
+            return;
+        }
+        delegate_->waitEvents();
+    }
+    RendererFramebufferExtent framebufferExtent() const noexcept override
+    {
+        return minimized_ ? RendererFramebufferExtent{} : delegate_->framebufferExtent();
+    }
+    bool consumeFramebufferResize() noexcept override
+    {
+        const bool injectedResize = std::exchange(framebufferResized_, false);
+        const bool nativeResize = delegate_->consumeFramebufferResize();
+        return injectedResize || nativeResize;
+    }
+    std::span<const char* const> requiredVulkanInstanceExtensions() const noexcept override
+    {
+        return delegate_->requiredVulkanInstanceExtensions();
+    }
+    VkSurfaceKHR createVulkanSurface(VkInstance instance) override
+    {
+        return delegate_->createVulkanSurface(instance);
+    }
+    void setWindowTitle(std::string_view title) override { delegate_->setWindowTitle(title); }
+    bool requestWindowResize(std::uint32_t width, std::uint32_t height) override
+    {
+        if (width == 0 || height == 0)
+        {
+            minimized_ = true;
+            framebufferResized_ = true;
+            return true;
+        }
+        return delegate_->requestWindowResize(width, height);
+    }
+
+private:
+    std::shared_ptr<RendererPlatform> delegate_;
+    bool minimized_ = false;
+    bool framebufferResized_ = false;
+};
+
+constexpr std::uint32_t animatedStressModelCount = 24;
+
+danvulkan::assets::SceneAsset makeAnimatedStressScene()
+{
+    danvulkan::assets::SceneAsset scene =
+        danvulkan::assets::loadScene("models/naruto_hiddenly_village.glb");
+    const danvulkan::assets::SceneAsset character =
+        danvulkan::assets::loadScene("models/ninja_run_free_fire_emote.glb");
+    if (character.animations().size() != 1)
+    {
+        throw std::runtime_error("animated stress fixture requires exactly one character clip");
+    }
+
+    danvulkan::assets::AnimationClipAsset aggregate;
+    aggregate.name = "all stress characters";
+    aggregate.startTime = character.animations().front().startTime;
+    aggregate.endTime = character.animations().front().endTime;
+    const std::uint32_t sharedMeshOffset = static_cast<std::uint32_t>(scene.meshes().size());
+    for (std::uint32_t index = 0; index < animatedStressModelCount; ++index)
+    {
+        constexpr std::uint32_t columns = 6;
+        const float x = (static_cast<float>(index % columns) - 2.5f) * 0.8f;
+        const float z = (static_cast<float>(index / columns) - 1.5f) * 0.8f;
+        const glm::mat4 placement =
+            glm::translate(glm::mat4(1.0f), glm::vec3(x, -0.335f, z)) *
+            glm::scale(glm::mat4(1.0f), glm::vec3(0.2f));
+        if (index == 0)
+        {
+            const std::size_t firstAppendedClip = scene.animations().size();
+            static_cast<void>(scene.append(character, placement));
+            const danvulkan::assets::AnimationClipAsset& appended =
+                scene.animations()[firstAppendedClip];
+            aggregate.channels.insert(aggregate.channels.end(), appended.channels.begin(),
+                appended.channels.end());
+            continue;
+        }
+
+        const std::uint32_t nodeOffset = static_cast<std::uint32_t>(scene.nodes().size());
+        const auto remapNode = [nodeOffset](danvulkan::assets::NodeHandle handle)
+        {
+            return handle ? danvulkan::assets::NodeHandle{handle.slot + nodeOffset, 1U} :
+                danvulkan::assets::NodeHandle{};
+        };
+        std::vector<danvulkan::assets::SkinHandle> skinHandles;
+        skinHandles.reserve(character.skins().size());
+        for (const danvulkan::assets::SkinAsset& source : character.skins())
+        {
+            danvulkan::assets::SkinAsset skin = source;
+            skin.skeleton = remapNode(skin.skeleton);
+            for (danvulkan::assets::NodeHandle& joint : skin.joints)
+            {
+                joint = remapNode(joint);
+            }
+            skinHandles.push_back(scene.addSkin(std::move(skin)));
+        }
+
+        std::vector<bool> rootNodes(character.nodes().size(), false);
+        for (const danvulkan::assets::NodeHandle root : character.rootNodes())
+        {
+            rootNodes.at(root.slot) = true;
+        }
+        for (std::size_t nodeIndex = 0; nodeIndex < character.nodes().size(); ++nodeIndex)
+        {
+            danvulkan::assets::NodeAsset node = character.nodes()[nodeIndex];
+            if (rootNodes[nodeIndex])
+            {
+                node.localTransform = placement * node.localTransform;
+                node.transformIsTrs = false;
+            }
+            for (danvulkan::assets::MeshHandle& mesh : node.meshes)
+            {
+                mesh = {mesh.slot + sharedMeshOffset, 1U};
+            }
+            if (node.skin)
+            {
+                node.skin = skinHandles.at(node.skin.slot);
+            }
+            for (danvulkan::assets::NodeHandle& child : node.children)
+            {
+                child = remapNode(child);
+            }
+            static_cast<void>(scene.addNode(std::move(node)));
+        }
+        for (const danvulkan::assets::NodeHandle root : character.rootNodes())
+        {
+            scene.addRootNode(remapNode(root));
+        }
+        for (const danvulkan::assets::AnimationChannelAsset& source :
+            character.animations().front().channels)
+        {
+            danvulkan::assets::AnimationChannelAsset channel = source;
+            channel.target = remapNode(channel.target);
+            aggregate.channels.push_back(std::move(channel));
+        }
+    }
+    static_cast<void>(scene.addAnimation(std::move(aggregate)));
+    return scene;
+}
+}
 
 int main(int argc, char** argv)
 {
@@ -22,6 +185,7 @@ int main(int argc, char** argv)
                 glm::scale(glm::mat4(1.0f), glm::vec3(0.2f))
         });
         bool stepDriven = false;
+        bool animatedStress = false;
         if (argc > 1 && std::string_view(argv[1]) == "--smoke-test")
         {
             config.maxFrames = 120;
@@ -37,6 +201,15 @@ int main(int argc, char** argv)
             config.maxFrames = 120;
             config.resizeAtFrame = 30;
         }
+        else if (argc > 1 && std::string_view(argv[1]) == "--minimize-smoke-test")
+        {
+            config.maxFrames = 120;
+            config.resizeAtFrame = 30;
+            config.resizeWidth = 0;
+            config.resizeHeight = 0;
+            config.platform = std::make_shared<MinimizeRestorePlatform>(
+                makeGlfwRendererPlatform(config.applicationName, config.width, config.height));
+        }
         else if (argc > 1 && std::string_view(argv[1]) == "--step-smoke-test")
         {
             config.maxFrames = 120;
@@ -44,9 +217,88 @@ int main(int argc, char** argv)
             config.initialIndexCapacity = 6;
             stepDriven = true;
         }
+        else if (argc > 1 && std::string_view(argv[1]) == "--animated-stress-test")
+        {
+            config.maxFrames = 120;
+            config.additionalScenes.clear();
+            animatedStress = true;
+        }
 
         VulkanRenderer renderer(std::move(config));
-        if (!stepDriven)
+        if (animatedStress)
+        {
+            renderer.initialize();
+            const danvulkan::assets::SceneAsset stressScene = makeAnimatedStressScene();
+            renderer.replaceScene(stressScene);
+            const std::vector<SceneAnimationInfo> animations = renderer.sceneAnimations();
+            if (animations.empty())
+            {
+                throw std::runtime_error("animated stress scene exposed no clips");
+            }
+            renderer.playAnimation(animations.back().handle);
+
+            SceneSubmission submission;
+            submission.cameraPosition = glm::vec3(0.0f, 3.0f, 8.0f);
+            submission.view = glm::lookAt(submission.cameraPosition, glm::vec3(0.0f),
+                glm::vec3(0.0f, 1.0f, 0.0f));
+            submission.projection = glm::perspective(glm::radians(60.0f),
+                1280.0f / 720.0f, 0.1f, 100.0f);
+            while (renderer.beginFrame())
+            {
+                renderer.submitScene(submission);
+                renderer.endFrame();
+            }
+
+            const RendererPerformanceStats stats = renderer.performanceStats();
+            const RendererMemoryStats memory = renderer.memoryStats();
+            std::cout << "animated stress: models=" << animatedStressModelCount
+                      << " frames=" << stats.renderedFrames
+                      << " active_draws=" << stats.activeDraws
+                      << " visible_draws=" << stats.visibleDraws
+                      << " joints=" << stats.jointMatrices << '\n'
+                      << "animated stress timings: frame_cpu_ms=" << stats.frameCpuMilliseconds
+                      << " frame_gpu_ms=" << stats.frameGpuMilliseconds
+                      << " animation_ms=" << stats.animationCpuMilliseconds
+                      << " animation_evaluation_ms="
+                      << stats.animationEvaluationCpuMilliseconds
+                      << " animation_sync_ms="
+                      << stats.animationSynchronizationCpuMilliseconds
+                      << " culling_ms=" << stats.cullingCpuMilliseconds
+                      << " buffer_writes_ms=" << stats.bufferWriteCpuMilliseconds
+                      << " command_recording_ms=" << stats.commandRecordingCpuMilliseconds
+                      << '\n'
+                      << "animated stress memory: blocks=" << memory.blockCount
+                      << " allocations=" << memory.allocationCount
+                      << " block_bytes=" << memory.blockBytes
+                      << " allocation_bytes=" << memory.allocationBytes
+                      << " heap_usage_bytes=" << memory.heapUsageBytes
+                      << " heap_budget_bytes=" << memory.heapBudgetBytes
+                      << " peak_block_bytes=" << memory.peakBlockBytes
+                      << " peak_allocation_bytes=" << memory.peakAllocationBytes
+                      << " staging_arena_bytes=" << memory.stagingArenaBytes
+                      << " staging_growths=" << memory.stagingArenaGrowthCount
+                      << " upload_submissions=" << memory.uploadSubmissionCount
+                      << " cpu_geometry_bytes=" << memory.retainedCpuGeometryBytes
+                      << " cpu_scratch_bytes=" << memory.cpuScratchBytes
+                      << " attachment_sets=" << memory.attachmentSetCount
+                      << " msaa_samples=" << memory.msaaSamples
+                      << '\n';
+            if (stats.renderedFrames != 120 ||
+                stats.activeDraws < animatedStressModelCount * 5 ||
+                stats.visibleDraws == 0 ||
+                stats.jointMatrices != animatedStressModelCount * 375 ||
+                stats.animationCpuMilliseconds <= 0.0 ||
+                memory.attachmentSetCount != 2 || memory.blockCount == 0 ||
+                memory.allocationCount == 0 || memory.stagingArenaBytes == 0 ||
+                memory.stagingArenaGrowthCount == 0 || memory.uploadSubmissionCount == 0 ||
+                memory.retainedCpuGeometryBytes != 0 || memory.cpuScratchBytes == 0 ||
+                memory.peakAllocationBytes < memory.allocationBytes)
+            {
+                throw std::runtime_error("animated stress scene did not exercise its workload");
+            }
+            renderer.shutdown();
+        }
+        else if (!stepDriven)
         {
             renderer.run();
         }

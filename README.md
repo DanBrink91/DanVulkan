@@ -29,7 +29,8 @@ cmake --build --preset debug
 & .\build\windows\Debug\DanVulkan.exe
 ```
 
-Run the CPU asset, animation-player, and device-planning tests plus validation-layer standalone-loop, step-driven, and resize smoke tests with `ctest --preset debug`.
+Run the CPU asset, animation-player, and planning tests plus validation-layer standalone-loop,
+step-driven, resize, minimize/restore, and animated stress paths with `ctest --preset debug`.
 
 Run the executable with the repository root as its working directory so it can find `models/` and `textures/`.
 
@@ -77,9 +78,13 @@ The renderer loads the scene named by `RendererConfig::modelPath` during initial
 
 Internally, physical-device probing and logical-device ownership live in a focused device context. Selection requires Vulkan 1.4, every renderer feature, complete graphics/presentation queues, and adequate swapchain support; suitable candidates are scored deterministically rather than accepted in driver enumeration order. Queue-family selection and candidate scoring are Vulkan-free planning functions with dedicated CPU tests.
 
-Swapchain selection and ownership also live behind a focused context. Pure planning chooses the surface format, presentation mode, extent, image count, sharing mode, transform, and supported composite alpha; CPU tests cover those decisions. The context owns the swapchain and its image views, uses the previous handle during recreation, and receives framebuffer pixels from the platform adapter so it remains independent of GLFW.
+Swapchain selection and ownership also live behind focused contexts. Pure planning chooses the surface format, presentation mode, extent, image count, sharing mode, transform, and supported composite alpha; CPU tests cover those decisions. The swapchain context owns the swapchain and its image views, the attachment context owns per-frame depth and optional MSAA color targets, and the presentation context owns render-finished semaphores plus image-fence tracking. Recreation receives framebuffer pixels from the platform adapter, waits only frame fences and the presentation queue, and preserves format-compatible pipelines and same-count presentation semaphores.
 
 Descriptor policy and ownership are similarly isolated. Pure planning clamps bindless texture capacity, describes the renderer's shader bindings, and calculates overflow-safe pool sizes. The descriptor context owns the layout, pool, and per-swapchain sets; it performs initial buffer/texture writes plus the generation-gated vertex and texture migrations used by runtime resource updates.
+
+Graphics-pipeline policy and ownership live in a transactional pipeline context. Pure planning defines the culling, blending, and depth-write state for all six material variants. Shader modules, the pipeline layout, and pipeline handles are replaced as one complete set, and extent-only swapchain recreation retains compatible pipelines. Per-frame command pools, command buffers, acquire semaphores, fences, and timestamp queries are likewise owned by frame contexts; completed-frame timestamps are collected after their fence wait without serializing every submitted frame.
+
+Uploaded-scene ownership is isolated in a scene context. It holds scene metadata and handles, geometry and textures, per-swapchain scene buffers, free ranges, generation-gated retirement queues, and reusable animation/culling/indirect scratch. It also synchronizes animated poses, transforms bounds, culls and orders visible draws, and builds per-pipeline indirect batches. The top-level renderer now coordinates these focused owners and records frames without owning scene storage directly.
 
 `RendererConfig::additionalScenes` composes more glTF/GLB assets above the primary scene with a caller-supplied root transform. The demo uses it to place `ninja_run_free_fire_emote.glb` at village scale and automatically loops that file's first animation. Skinned vertices retain four joint indices and normalized weights; a CPU animation player evaluates linear or step translation, rotation, and scale channels, propagates the node hierarchy, and writes a per-frame joint palette consumed by the vertex shader. This temporary character proves the animation path while `naruto.glb` remains static and cannot yet receive the clip without being rigged.
 
@@ -106,13 +111,30 @@ Leaving `RendererConfig::platform` null selects the convenient renderer-owned GL
 
 `replaceScene()` accepts a complete decoded `SceneAsset` between frames. It validates and builds the replacement CPU metadata, textures, and device-local geometry before committing any live state. A successful commit advances the scene generation, invalidating every old handle at once. Old texture and geometry owners remain in the existing per-swapchain-image retirement queues until descriptors and command buffers have safely migrated, so replacement does not call `vkDeviceWaitIdle`.
 
-`RendererConfig::initialVertexCapacity` and `initialIndexCapacity` reserve device-local geometry ranges (4096 vertices and 8192 indices by default). Runtime uploads allocate a pair of free ranges and transfer only the new vertex/index bytes. `destroyMesh()` rejects meshes with live instances and defers returning their ranges until every swapchain image that could contain an older draw has completed. Adjacent free ranges are coalesced. If no contiguous range fits, capacity grows geometrically; swapchain images migrate to the replacement vertex buffer after their fences complete, and both old buffers remain alive until migration finishes.
+A Vulkan-free scene planner now validates resource references, graph ownership, animation data,
+capacities, skin indices, and decoded textures while packing geometry and flattening hierarchy draws.
+Startup and transactional replacement consume the same plan, including animated replacements.
+`RendererPerformanceStats` exposes rolling frame, GPU, animation evaluation/synchronization,
+culling, mapped-buffer-write, and command-recording measurements. Run
+`DanVulkan --animated-stress-test` to exercise 24 independently placed characters sharing one
+uploaded character resource set, with every animation channel active in an aggregate clip.
+
+`RendererConfig::memory.maxMsaaSamples` caps multisampling with a Vulkan-free numeric policy;
+zero selects the device maximum and one disables MSAA. Transient MSAA color and depth targets are
+allocated per frame in flight rather than per swapchain image, and lazy attachment memory is
+preferred when the device exposes it. `RendererMemoryStats` reports current and renderer-sampled peak
+VMA block/allocation counts and bytes, aggregate driver heap usage/budget, attachment-set count, and
+selected sample count. It also exposes staging-arena growth/submission counters, retained CPU geometry
+bytes, and persistent frame-scratch capacity. Swapchain-owned presentation images and ordinary CPU
+allocations are outside the VMA totals.
+
+`RendererConfig::initialVertexCapacity` and `initialIndexCapacity` reserve device-local geometry ranges (4096 vertices and 8192 indices by default). Runtime uploads allocate a pair of free ranges and transfer only the new vertex/index bytes. `destroyMesh()` rejects meshes with live instances and defers returning their ranges until every swapchain image that could contain an older draw has completed. Adjacent free ranges are coalesced. If no contiguous range fits, capacity grows geometrically; existing geometry is copied GPU-to-GPU, swapchain images migrate to the replacement vertex buffer after their fences complete, and both old buffers remain alive until migration finishes. Packed scene geometry exists on the CPU only while the initial or replacement upload is being prepared; spare GPU capacity and later growth do not retain a full CPU mirror.
 
 `RendererConfig::maxTextures` reserves bindless descriptor capacity (256 by default, clamped to the physical device limits). `RendererConfig::textureMipLodBias` controls the renderer-wide sampler bias; its mild `-0.5` default keeps atlas-backed terrain a little sharper while generated mipmaps, trilinear filtering, and anisotropy still suppress minification shimmer. `uploadTexture()` accepts a decoded `TextureAsset`, creates its Vulkan image/view/sampler, and returns a persistent texture handle. `updateMaterialTextures()` can rebind the five core glTF texture roles between frames. `destroyTexture()` rejects textures still referenced by a material, replaces the freed descriptor slot with a valid fallback, and advances that slot's generation before reuse. Each swapchain image receives new descriptors only after its fence completes; retired images, views, and samplers stay alive until every descriptor set has migrated.
 
 `RendererConfig::maxMaterials` reserves per-swapchain-image material storage (2048 by default, clamped to the shader ABI limit). A `RuntimeMaterialDescription` combines PBR factors, texture handles, alpha mode, and sidedness; newly created materials can be passed directly to later mesh uploads without rebuilding descriptors or waiting for the device to become idle. `destroyMaterial()` rejects materials still referenced by a mesh, removes the slot from scene queries, and advances its generation before reuse. Per-image material buffers make the reused GPU index visible only after the corresponding in-flight fence completes.
 
-The renderer uses explicit frame resources, synchronization2, dynamic rendering, and VMA-backed resource owners. Its dedicated upload subsystem owns staging allocation, transfer commands, synchronization2 barriers, GPU mip generation, and fence-backed submission; static scene geometry and decoded textures reach device-local memory without scene code managing upload mechanics.
+The renderer uses explicit frame resources, synchronization2, dynamic rendering, and VMA-backed resource owners. Its dedicated upload subsystem owns a single persistently mapped, geometrically grown staging arena, transfer commands, synchronization2 barriers, GPU mip generation, and fence-backed submission. Because submissions are currently synchronous, each payload safely reuses the arena from offset zero. Static scene geometry and decoded textures reach device-local memory without scene code managing upload mechanics.
 
 The GPU material path implements glTF metallic-roughness shading with base color, normal scale, packed metallic/roughness, occlusion strength, and emissive inputs. Texture filtering and wrap modes are imported per glTF texture. Opaque, alpha-mask, and alpha-blended materials use explicit single- and double-sided pipeline variants; transparent draws are sorted back-to-front within each culling variant.
 

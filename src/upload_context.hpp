@@ -7,6 +7,13 @@
 
 namespace danvulkan::vk
 {
+struct UploadArenaStats
+{
+    VkDeviceSize capacityBytes = 0;
+    std::uint64_t growthCount = 0;
+    std::uint64_t uploadCount = 0;
+};
+
 class UploadContext
 {
 public:
@@ -27,10 +34,17 @@ public:
         std::string_view name);
     void uploadImage(VkImage destination, std::uint32_t width, std::uint32_t height,
         std::uint32_t mipLevels, const void* rgba8, VkDeviceSize size, std::string_view name);
+    void copyBuffer(VkBuffer source, VkBuffer destination, VkDeviceSize size,
+        VkBufferUsageFlags destinationUsage, std::string_view name);
+
+    [[nodiscard]] UploadArenaStats arenaStats() const noexcept
+    {
+        return {staging_.size(), arenaGrowthCount_, uploadCount_};
+    }
 
 private:
-    [[nodiscard]] Buffer createStagingBuffer(
-        const void* data, VkDeviceSize size, std::string_view name) const;
+    void writeStaging(const void* data, VkDeviceSize size, std::string_view name);
+    void ensureStagingCapacity(VkDeviceSize requiredSize, std::string_view name);
     [[nodiscard]] VkCommandBuffer beginCommands();
     void submitAndWait(VkCommandBuffer commandBuffer);
     void setDebugName(VkObjectType objectType, std::uint64_t handle,
@@ -47,6 +61,9 @@ private:
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
+    Buffer staging_;
+    std::uint64_t arenaGrowthCount_ = 0;
+    std::uint64_t uploadCount_ = 0;
     bool enableDebugNames_ = false;
 };
 } // namespace danvulkan::vk

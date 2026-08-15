@@ -19,7 +19,9 @@ The legacy renderer was a single 2,700-line application tied to Vulkan 1.1.130 a
 - Checked Vulkan operations report the operation, symbolic `VkResult`, and numeric result.
 - `VK_EXT_debug_utils` is enabled in validation builds, with a debug messenger and names for queues, pipelines, descriptors, synchronization objects, and GPU resources.
 
-Some lightweight Vulkan objects such as pipelines, frame command pools, and frame synchronization primitives are still explicitly destroyed by the renderer. They can move into smaller subsystem owners as those subsystems are extracted. Descriptor and upload command/synchronization objects are now owned by their focused subsystems.
+Texture samplers remain explicitly destroyed by the renderer while their image allocations are
+RAII-owned. Pipeline, frame, descriptor, swapchain attachment, presentation, and upload
+command/synchronization objects are owned by their focused subsystems.
 
 ### Device selection and context
 
@@ -47,25 +49,52 @@ Some lightweight Vulkan objects such as pipelines, frame command pools, and fram
 - Swapchain image-count changes rebuild the context's pool and sets alongside the corresponding per-image buffers. The immutable layout remains stable for the graphics pipeline.
 - A CPU-only descriptor-planner test covers capacity clamping/rejection, shader binding roles, pool sizing, zero-input rejection, and count-overflow rejection.
 
+### Graphics pipeline planning and context
+
+- Pure pipeline planning defines the six opaque, masked, and blended single- and double-sided variants, including their culling, blending, and depth-write policy plus dynamic-rendering attachment compatibility.
+- `PipelineContext` owns shader-module loading, the pipeline layout, and every graphics-pipeline handle. Creation and shader reload build a complete replacement before retiring the active set, so a failed rebuild leaves the previous pipelines intact.
+- Swapchain recreation retains pipelines when the descriptor layout, color/depth formats, and sample count remain compatible. Dynamic viewport and scissor state means an extent-only resize does not rebuild them.
+- A CPU-only pipeline-planner test covers invalid attachment inputs, stencil selection, multisampling, and all six material variants.
+
 ### Frame and rendering model
 
-- `FrameResources` owns the command pool, command buffer, acquire semaphore, and fence for each frame in flight.
-- Presentation semaphores, attachment images, descriptors, and image fences remain indexed by swapchain image rather than frame index.
+- `FrameContext` owns the command pool, command buffer, acquire semaphore, fence, and timestamp query pool for each frame in flight.
+- `PresentationContext` owns render-finished semaphores and image-fence tracking indexed by swapchain image. Same-count recreation retains its semaphores after presentation completion.
+- `AttachmentContext` transactionally owns per-frame depth and optional MSAA color images plus their views. It retains the active set when extent, count, formats, samples, and allocation policy are unchanged.
 - Both frame submissions and upload submissions use synchronization2 (`vkQueueSubmit2`).
 - Resource transitions use synchronization2 barriers (`vkCmdPipelineBarrier2`).
 - Dynamic rendering replaces render passes and framebuffers.
 - Viewport and scissor are dynamic pipeline state.
-- MSAA color and depth attachments are allocated per swapchain image, preventing concurrent frames from sharing writable attachments.
+- MSAA color and depth attachments are allocated per frame in flight. Fence-gated frame reuse prevents concurrent submissions from sharing writable attachments without tying their count to presentation buffering.
+- GPU timestamps are read only after that frame context's fence completes. The renderer no longer requests blocking query results immediately after presentation, so its two frames in flight can overlap.
+- Swapchain recreation waits for each frame fence and then the presentation queue before retiring old image views and dependent resources. It no longer stalls unrelated device queues with `vkDeviceWaitIdle`.
+
+### Renderer decomposition
+
+- `renderer.cpp` is now the lifecycle and frame-orchestration layer. Device, swapchain, attachment, presentation, descriptor, pipeline, frame, upload, and uploaded-scene lifetimes are held by focused contexts in separate translation units.
+- `SceneContext` owns the active scene's CPU metadata, device-local vertex/index buffers, texture images and samplers, per-image material/transform/draw/joint/indirect buffers, handle generations, free geometry ranges, and persistent draw scratch as one lifetime domain.
+- Per-image geometry and texture descriptor migration, old-buffer/texture retirement, deferred geometry-range reclamation, swapchain-wide retirement completion, and scene teardown are implemented by the scene context instead of the top-level renderer.
+- Animation pose synchronization, transformed bounds, frustum culling, transparent ordering, and indirect batch construction are likewise scene operations. The renderer receives compact draw counts and records the resulting batches.
+- The scene context is composed after the allocator/device owners, guaranteeing its Vulkan allocations are destroyed first even during partial construction. A CPU-focused context test covers range allocation/coalescing, capacity growth, transformed bounds, culling, transparent ordering, and pipeline batches.
 
 ### Memory and uploads
 
 - Vulkan Memory Allocator 3.3.0 replaces manual memory-type selection, allocation, binding, mapping, and release.
+- A pure memory-policy planner selects the highest mutually supported color/depth sample count under an optional renderer cap. `RendererConfig::memory.maxMsaaSamples` can disable MSAA or bound its memory cost without exposing Vulkan flags through the public API.
+- Writable MSAA color and depth targets are owned per fenced frame in flight rather than per presentation image. With two frames and three swapchain images on the current 2560x1440 macOS baseline, this removes one color/depth pair and reduces VMA block memory by 114.5 MiB.
+- Both discard-only color and depth targets declare transient attachment usage. VMA prefers lazily allocated memory when requested and supported, with ordinary device-local memory remaining the portable fallback.
+- `RendererMemoryStats` reports VMA block/allocation counts and bytes, aggregate heap usage/budget, selected samples, and frame-indexed attachment-set count. The animated stress output captures these values alongside timing diagnostics.
 - Host-visible uniform, storage, indirect, and staging buffers are persistently mapped; writes are flushed through VMA for non-coherent-memory portability.
 - Static vertex and index data are staged into shared device-local buffers.
-- `UploadContext` is a focused renderer subsystem in its own translation unit. It owns a dedicated transient command pool, reusable command buffer, and fence, plus creation and flushing of short-lived VMA staging buffers.
+- `UploadContext` is a focused renderer subsystem in its own translation unit. It owns a dedicated transient command pool, reusable command buffer, and fence, plus one persistently mapped, geometrically grown VMA staging arena. Synchronous fence completion lets every upload safely reuse offset zero; growing payloads replace the arena, while smaller later uploads create no Vulkan buffer or allocation churn.
 - Scene/resource code describes buffer or RGBA8 image uploads using destination, payload, and intended usage. Buffer copies, synchronization2 barriers, image layout transitions, queue submission, and fence waits remain private to the subsystem.
 - A texture upload records its undefined-to-transfer transition, buffer-to-image copy, and shader-read transition in one synchronized submission. Uploads no longer borrow frame command pools or wait for the entire graphics queue to become idle.
 - Sampled textures allocate a complete mip chain when their Vulkan format supports filtered blits. The upload subsystem generates every level on the GPU in the same synchronized submission, and image views and samplers expose the full chain so imported trilinear filtering works as authored.
+- Scene plans retain only packed, used vertex and index elements; configured spare GPU capacity no longer pads the CPU vectors. Initial and replacement payloads are released after upload instead of becoming renderer-owned mirrors.
+- Device-local geometry buffers include transfer-source usage. Capacity growth allocates replacement buffers and preserves existing ranges with GPU-to-GPU copies, so runtime mesh uploads no longer require full CPU vertex/index ownership.
+- Joint-palette, visible-mesh bucket, indirect-command, and visible-draw scratch capacities are reserved from the prepared scene and retained across frames. Animation synchronization and frustum culling clear and reuse this storage rather than rebuilding it each frame.
+- Memory telemetry includes renderer-sampled peak VMA block/allocation bytes, counts, and heap usage, plus staging-arena capacity/growth/submission counters, retained CPU geometry bytes, and reserved CPU scratch bytes. Peak sampling occurs while old and replacement scene resources coexist.
+- In the 24-character animated stress path, the staging arena grows once to 16 MiB and services nine upload submissions; steady renderer CPU geometry ownership is zero and persistent animation/culling scratch is about 568 KiB. Current VMA allocation bytes are 281.5 MiB and the scene-replacement high-water mark is 313.5 MiB on the current macOS debug baseline. VMA block reservation remains 357.0 MiB because the arena fits in the allocator's existing blocks.
 
 ### Asset boundary
 
@@ -78,14 +107,18 @@ Some lightweight Vulkan objects such as pipelines, frame command pools, and fram
 - fastgltf 0.9.0 is pinned privately behind `DanVulkan::Assets`; no importer-specific types leak into public headers.
 - `loadScene` dispatches `.gltf`, `.glb`, and compatibility `.obj` assets. External, embedded, and GLB buffer/image payloads are decoded on the CPU.
 - `SceneAsset` preserves node hierarchies, local transforms, mesh instances, and default-scene roots. The renderer uploads shared geometry once and emits per-node transform/draw data.
+- A Vulkan-free scene planner validates textures, cross-resource handles, animation samples, skin joints, hierarchy cycles and ownership, and renderer capacities. It deterministically packs geometry and emits transforms, world bounds, draw records, and joint-palette offsets.
+- Initial upload and transactional replacement now consume the same scene plan. Animated replacement is supported, and skinned primitives attached to the same node share one planned joint palette.
 - Instance bounds are transformed to world space before frustum culling.
 - glTF base-color, metallic-roughness, normal, occlusion, emissive, alpha, and double-sided inputs are represented in CPU materials and carried across the renderer upload boundary.
 - The renderer's default demo scene is the bundled `models/naruto_hiddenly_village.glb`; the small triangle glTF and OBJ assets remain deterministic importer and runtime-replacement fixtures.
 
 ### Validation tests
 
-- Validation-layer tests cover the standalone demo loop, the step-driven application loop, and a forced window resize/swapchain recreation; a validation error makes the executable and test fail.
-- Nine tests now cover CPU asset import, animation playback, pure device, descriptor, and swapchain planning, and four renderer validation paths.
+- Validation-layer tests cover the standalone demo loop, the step-driven application loop, forced window resize/swapchain recreation, and deterministic zero-extent minimize/restore recovery; a validation error makes the executable and test fail.
+- Fifteen tests now run: nine CPU-focused asset, animation, device, descriptor, swapchain, graphics-pipeline, memory-policy, scene-planning, and scene-context paths, plus six renderer validation/stress paths.
+- The animated stress path instances 24 characters while sharing their uploaded textures, materials, and geometry. One aggregate clip advances all 3,648 animation channels; the test verifies 122 active/visible draws and 9,000 joint matrices without imposing hardware-specific timing thresholds.
+- Rolling diagnostics split CPU animation evaluation from renderer pose/palette synchronization and also report culling, mapped-buffer writes, command recording, whole-frame CPU time, and GPU timestamps. On the current macOS debug baseline, animation synchronization is the dominant measured hot zone, followed by clip evaluation; culling, buffer writes, and command recording are negligible by comparison.
 
 ### Game integration
 
@@ -123,7 +156,7 @@ The current lighting environment is intentionally small: one submitted point lig
 - `sceneAnimations()` exposes clip names, durations, and generation-tagged handles. Public controls select/restart a clip, play, pause, resume, stop and rewind, seek, toggle looping, set positive playback speed, and query the current playback state. Mutations use the same between-frame contract as runtime scene updates, and scene replacement makes old clip handles stale.
 - A Vulkan-free player test covers deterministic clip selection, pause/resume, speed scaling, seeking, looping policy, terminal state, stop/rewind behavior, and invalid inputs. The step-driven validation test exercises the public controls and stale-handle rejection against the live renderer.
 
-The supplied `naruto.glb` has no skin, joint weights, skeleton, or animations, so it cannot be deformed by the run clip yet. Replacing the temporary character requires a rigged Naruto export with compatible humanoid joint semantics. Cubic-spline channels, morph targets, clip blending, independent player instances for multiple animated actors, general cross-skeleton retargeting, animated whole-scene replacement, and a gameplay locomotion controller remain future work.
+The supplied `naruto.glb` has no skin, joint weights, skeleton, or animations, so it cannot be deformed by the run clip yet. Replacing the temporary character requires a rigged Naruto export with compatible humanoid joint semantics. Cubic-spline channels, morph targets, clip blending, independent player instances for multiple animated actors, general cross-skeleton retargeting, and a gameplay locomotion controller remain future work.
 
 ### Runtime scene updates
 
@@ -154,6 +187,7 @@ The supplied `naruto.glb` has no skin, joint weights, skeleton, or animations, s
 - Material slots now track occupancy and individual generations. `destroyMaterial()` rejects a material while any live mesh references its GPU index, removes it from `sceneMaterials()`, and returns the stable slot to `createMaterial()` with an advanced generation.
 - Material slot reuse needs no device-wide idle or separate Vulkan retirement queue: each swapchain image receives the replacement value only after its own in-flight fence completes, while older submissions retain that image's previous material-buffer copy.
 - `replaceScene()` validates a complete decoded `SceneAsset` and creates its texture and device-local geometry owners before committing the replacement, so CPU validation or GPU preparation failure leaves the active scene untouched.
+- Replacement uses the same pure plan and animation preparation as initial upload, removing the former static-only replacement restriction.
 - A successful replacement advances the scene generation and installs packed instance, mesh, material, and texture slots, making every handle from the previous scene stale even when its numeric slot is reused.
 - Previous texture and geometry owners enter their established generation queues. Each swapchain image migrates descriptors and records commands for the replacement only after its fence completes; material, transform, draw, and indirect buffers are likewise rewritten per image without a device-wide idle.
 - The step-driven validation test uses deliberately small geometry capacities to exercise in-capacity range uploads, buffer growth, deferred range reclamation, and later reuse. It also verifies referenced mesh/material/texture destruction is rejected, safely reuses their metadata slots, rejects stale handles, verifies transform-slot reuse, rejects invalid replacement scenes transactionally, and renders after whole-scene replacement under validation layers.
@@ -162,8 +196,8 @@ The supplied `naruto.glb` has no skin, joint weights, skeleton, or animations, s
 
 ## Next refactors
 
-1. **Renderer subsystems** - extract graphics-pipeline planning and ownership from `renderer.cpp`, followed by frame command/synchronization ownership.
-2. **Lighting and environment** - add image-based lighting, environment resources, multiple lights, and shadows on top of the PBR material model.
-3. **Testing** - extract more resource planning into testable pure functions, add minimize recovery cases, and add resource-creation tests that can run without the demo scene.
+1. **Lighting and environment** - add image-based lighting, environment resources, multiple lights, and shadows on top of the PBR material model.
+2. **Testing, animation profiling, and draw compaction** - add resource-creation tests that can run without the demo scene, then use the animated stress diagnostics to reduce repeated pose synchronization and joint-palette work. Independently timed actors still require their own evaluated pose and joint palette, but shared meshes can be submitted as instanced indirect draws by compacting visible per-actor transform and palette indices into mesh/pipeline groups. Pose or palette sharing is an optional optimization only for actors that actually resolve to the same animation state; it must not be assumed by the batching design.
+3. **Upload batching and asynchronous transfer** - the reusable staging arena currently reflects the upload subsystem's intentionally synchronous fence contract. A later resource-streaming boundary can suballocate multiple payloads in one batch, submit them together, and retire arena ranges by transfer timeline value without changing scene ownership.
 
-The recommended next implementation slice extracts graphics-pipeline planning and ownership. Move shader-module loading, fixed-function variant decisions, pipeline-layout lifetime, dynamic-rendering format selection, and graphics-pipeline handles behind a focused pipeline context while keeping shader hot-reload triggers in the renderer boundary.
+The recommended next implementation slice establishes the lighting/environment resource boundary before adding new shading features. Start with a Vulkan-free light/environment description and descriptor planning, then add environment image ownership and shader bindings without coupling asset import to renderer internals.

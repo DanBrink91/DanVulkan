@@ -22,6 +22,16 @@ struct AdditionalSceneConfig
     glm::mat4 rootTransform{1.0f};
 };
 
+struct RendererMemoryPolicy
+{
+    // Zero selects the device's highest mutually supported color/depth sample count. Set to one
+    // to disable MSAA, or to another power of two to cap the selected sample count.
+    std::uint32_t maxMsaaSamples = 0;
+    // Transient attachments remain fully functional when lazy memory is unavailable; this only
+    // controls whether the allocator prefers a lazily allocated memory type when one is offered.
+    bool preferLazilyAllocatedAttachments = true;
+};
+
 struct RendererConfig
 {
     std::string applicationName = "DanVulkan";
@@ -36,6 +46,7 @@ struct RendererConfig
     float textureMipLodBias = -0.5f;
     std::uint32_t initialVertexCapacity = 4096;
     std::uint32_t initialIndexCapacity = 8192;
+    RendererMemoryPolicy memory;
     std::uint64_t maxFrames = 0;
     std::uint64_t resizeAtFrame = 0;
     std::uint32_t resizeWidth = 960;
@@ -235,6 +246,52 @@ struct SceneTextureInfo
     danvulkan::assets::TextureSampler sampler;
 };
 
+struct RendererPerformanceStats
+{
+    std::uint64_t renderedFrames = 0;
+    double frameCpuMilliseconds = 0.0;
+    double frameGpuMilliseconds = 0.0;
+    double animationCpuMilliseconds = 0.0;
+    double animationEvaluationCpuMilliseconds = 0.0;
+    double animationSynchronizationCpuMilliseconds = 0.0;
+    double cullingCpuMilliseconds = 0.0;
+    double bufferWriteCpuMilliseconds = 0.0;
+    double commandRecordingCpuMilliseconds = 0.0;
+    std::uint32_t activeDraws = 0;
+    std::uint32_t visibleDraws = 0;
+    std::uint32_t animatedDraws = 0;
+    std::uint32_t jointMatrices = 0;
+};
+
+struct RendererMemoryStats
+{
+    // Current VMA state.
+    std::uint64_t blockBytes = 0;
+    std::uint64_t allocationBytes = 0;
+    std::uint64_t heapUsageBytes = 0;
+    std::uint64_t heapBudgetBytes = 0;
+    std::uint32_t blockCount = 0;
+    std::uint32_t allocationCount = 0;
+    // High-water marks sampled after initialization and resource mutations, including the point
+    // where old and replacement scene resources coexist.
+    std::uint64_t peakBlockBytes = 0;
+    std::uint64_t peakAllocationBytes = 0;
+    std::uint64_t peakHeapUsageBytes = 0;
+    std::uint32_t peakBlockCount = 0;
+    std::uint32_t peakAllocationCount = 0;
+    // The upload arena is one persistently mapped allocation reused from offset zero after each
+    // synchronous upload. CPU geometry is temporary and should be zero outside scene preparation.
+    std::uint64_t stagingArenaBytes = 0;
+    std::uint64_t stagingArenaGrowthCount = 0;
+    std::uint64_t uploadSubmissionCount = 0;
+    std::uint64_t retainedCpuGeometryBytes = 0;
+    std::uint64_t cpuScratchBytes = 0;
+    // Number of frame-indexed color/depth target sets, not the number of individual images.
+    std::uint32_t attachmentSetCount = 0;
+    std::uint32_t msaaSamples = 1;
+    bool prefersLazilyAllocatedAttachments = false;
+};
+
 class VulkanRenderer
 {
 public:
@@ -262,6 +319,14 @@ public:
     [[nodiscard]] std::vector<SceneTextureInfo> sceneTextures() const;
     [[nodiscard]] std::vector<SceneAnimationInfo> sceneAnimations() const;
     [[nodiscard]] AnimationPlaybackState animationPlaybackState() const;
+    // Rolling measurements are diagnostic rather than benchmark guarantees. They remain
+    // available after shutdown so automated stress modes can print their final sample.
+    [[nodiscard]] RendererPerformanceStats performanceStats() const noexcept;
+    // VMA totals describe current allocator blocks and logical allocations. Peak fields are
+    // renderer-sampled high-water marks rather than driver guarantees. Heap usage/budget includes
+    // memory reported by the driver for this process and remains a diagnostic estimate. The last
+    // live snapshot remains available after shutdown.
+    [[nodiscard]] RendererMemoryStats memoryStats() const noexcept;
 
     // Animation mutations happen between frames. Selecting a different clip always starts it
     // from the beginning; restart=false preserves an already-selected active or paused cursor.

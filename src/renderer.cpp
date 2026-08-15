@@ -5,9 +5,17 @@
 
 #include "glfw_platform.hpp"
 #include "animation_player.hpp"
+#include "attachment_context.hpp"
 #include "descriptor_context.hpp"
 #include "descriptor_planner.hpp"
 #include "device_context.hpp"
+#include "frame_context.hpp"
+#include "memory_planner.hpp"
+#include "pipeline_context.hpp"
+#include "pipeline_planner.hpp"
+#include "presentation_context.hpp"
+#include "scene_context.hpp"
+#include "scene_planner.hpp"
 #include "swapchain_context.hpp"
 #include "upload_context.hpp"
 #include "vulkan_raii.hpp"
@@ -24,7 +32,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -40,7 +47,6 @@
 #include <vector>
 #include <optional>
 #include <string_view>
-#include <tuple>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -52,82 +58,25 @@
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
 
-struct DrawData
-{
-    int32_t materialIndex; // Index into material buffer
-    int32_t transformIndex; // Index into transform buffer
-    int32_t vertexOffset; // used to lookup attributes in vertex storage buffer
-    int32_t jointOffset = -1; // -1 for rigid meshes, otherwise the first matrix in the joint palette
-
-    // Gameplay data?
-};
-
-struct MeshData
-{
-    uint32_t indexCount;
-    uint32_t firstIndex;
-    uint32_t vertexOffset;
-    uint32_t pipelineVariant;
-    std::uint32_t meshResourceSlot;
-    DrawData drawData;
-    danvulkan::assets::Bounds localBounds;
-};
-
-struct MeshResourceData
-{
-    std::uint32_t indexCount = 0;
-    std::uint32_t vertexCount = 0;
-    std::uint32_t firstIndex = 0;
-    std::uint32_t vertexOffset = 0;
-    std::int32_t materialIndex = -1;
-    std::uint32_t pipelineVariant = 0;
-    danvulkan::assets::Bounds bounds{};
-    std::string name;
-};
-
-struct RetiredGeometry
-{
-    std::uint64_t version = 0;
-    danvulkan::vk::Buffer vertexBuffer;
-    danvulkan::vk::Buffer indexBuffer;
-};
-
-struct GeometryRange
-{
-    std::uint32_t offset = 0;
-    std::uint32_t count = 0;
-};
-
-struct RetiredGeometryRanges
-{
-    std::uint64_t version = 0;
-    GeometryRange vertices;
-    GeometryRange indices;
-};
-
-
-
-struct MaterialData
-{
-    glm::vec4 baseColorFactor;
-    glm::vec4 emissiveMetallic;
-    glm::vec4 roughnessNormalOcclusionAlpha;
-    glm::vec4 textureTiling;
-    glm::ivec4 textureIndices;
-    glm::ivec4 materialFlags;
-};
-static_assert(sizeof(MaterialData) == 96, "MaterialData must match shaders/frag.frag");
-
-struct TransformData
-{
-    glm::mat4 model;
-};
-
-using Vertex = danvulkan::assets::Vertex;
-static_assert(sizeof(Vertex) == 112, "CPU vertex layout must match shaders/vert.vert");
-
-const uint32_t DrawDataCount = 2048, MatDataCount = 2048, TransformDataCount = 2048;
-const uint32_t JointMatrixCount = 4096;
+using danvulkan::vk::AnimatedDrawState;
+using danvulkan::vk::DrawBatch;
+using danvulkan::vk::DrawData;
+using danvulkan::vk::DrawDataCount;
+using danvulkan::vk::GeometryRange;
+using danvulkan::vk::JointMatrixCount;
+using danvulkan::vk::MatDataCount;
+using danvulkan::vk::MaterialData;
+using danvulkan::vk::MeshData;
+using danvulkan::vk::MeshResourceData;
+using danvulkan::vk::PreparedSceneData;
+using danvulkan::vk::RetiredGeometry;
+using danvulkan::vk::RetiredGeometryRanges;
+using danvulkan::vk::RetiredTexture;
+using danvulkan::vk::SkinnedDrawState;
+using danvulkan::vk::Texture;
+using danvulkan::vk::TransformData;
+using danvulkan::vk::TransformDataCount;
+using danvulkan::vk::Vertex;
 
 struct UniformBufferObject {
     glm::mat4 view;
@@ -136,82 +85,14 @@ struct UniformBufferObject {
     glm::vec4 lightPosition;
 };
 
-struct SkinnedDrawState
-{
-    danvulkan::assets::NodeHandle node;
-    danvulkan::assets::SkinHandle skin;
-    std::uint32_t transformIndex = 0;
-    std::uint32_t jointOffset = 0;
-    std::uint32_t meshDataIndex = 0;
-};
-
-struct AnimatedDrawState
-{
-    danvulkan::assets::NodeHandle node;
-    std::uint32_t transformIndex = 0;
-    std::uint32_t meshDataIndex = 0;
-};
 static_assert(sizeof(UniformBufferObject) == 160,
     "UniformBufferObject must match the shader std140 layout");
 
 using AABB = danvulkan::assets::Bounds;
 
-struct Texture
-{
-    danvulkan::vk::Image image;
-    VkFormat format = VK_FORMAT_UNDEFINED;
-    VkSampler sampler = VK_NULL_HANDLE;
-    std::string name;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    std::uint32_t mipLevels = 1;
-    danvulkan::assets::ColorSpace colorSpace = danvulkan::assets::ColorSpace::srgb;
-    danvulkan::assets::TextureSampler samplerConfig;
-};
+using danvulkan::vk::PipelineVariant;
+using danvulkan::vk::PipelineVariantCount;
 
-struct PreparedSceneData
-{
-    std::uint32_t generation = 0;
-    std::uint32_t vertexCapacity = 0;
-    std::uint32_t indexCapacity = 0;
-    std::vector<Vertex> vertices;
-    std::vector<std::uint32_t> indices;
-    std::vector<GeometryRange> freeVertexRanges;
-    std::vector<GeometryRange> freeIndexRanges;
-    std::vector<MaterialData> materials;
-    std::vector<std::string> materialNames;
-    std::vector<MeshResourceData> meshResources;
-    std::vector<TransformData> transforms;
-    std::vector<std::string> instanceNames;
-    std::vector<DrawData> draws;
-    std::vector<MeshData> meshes;
-    std::vector<AABB> bounds;
-};
-
-struct RetiredTexture
-{
-    std::uint64_t version = 0;
-    Texture texture;
-};
-
-enum class PipelineVariant : std::uint32_t
-{
-    opaque = 0,
-    opaqueDoubleSided,
-    mask,
-    maskDoubleSided,
-    blend,
-    blendDoubleSided,
-    count
-};
-
-constexpr std::size_t PipelineVariantCount = static_cast<std::size_t>(PipelineVariant::count);
-
-struct DrawBatch
-{
-    std::uint32_t firstCommand = 0;
-    std::uint32_t commandCount = 0;
-};
 
 struct PointLight
 {
@@ -220,32 +101,6 @@ struct PointLight
     glm::vec3 color;
     float unused0;
 };
-
-struct FrameResources
-{
-    VkCommandPool commandPool = VK_NULL_HANDLE;
-    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkSemaphore imageAvailable = VK_NULL_HANDLE;
-    VkFence inFlight = VK_NULL_HANDLE;
-};
-
-static std::vector<char> readFile(const std::string& filename)
-{
-    std::ifstream file(filename, std::ios::ate | std::ios::binary);
-
-    if (!file.is_open())
-    {
-        throw std::runtime_error("failed to open file!");
-    }
-    size_t fileSize = (size_t)file.tellg();
-    std::vector<char> buffer(fileSize);
-
-    file.seekg(0);
-    file.read(buffer.data(), fileSize);
-    file.close();
-
-    return buffer;
-}
 
 static void checkVk(VkResult result, std::string_view operation)
 {
@@ -290,7 +145,9 @@ public:
         }
         catch (...)
         {
-            platform_.reset();
+            // Context resets are null-safe and preserve Vulkan dependency order, so partially
+            // created scene resources cannot outlive their allocator after failed initialization.
+            cleanup();
             throw;
         }
     }
@@ -335,8 +192,10 @@ public:
         }
 
         const auto animationTime = std::chrono::steady_clock::now();
+        const auto animationBegin = animationTime;
         updateAnimation(std::min(
             std::chrono::duration<float>(animationTime - animationPreviousTime_).count(), 0.1f));
+        animationCpuAvg_ = rollingAverage(animationCpuAvg_, millisecondsSince(animationBegin));
         animationPreviousTime_ = animationTime;
 
         pendingSubmission_.reset();
@@ -382,18 +241,18 @@ public:
     {
         requireInitialized("sceneInstances");
         std::vector<SceneInstanceInfo> result;
-        result.reserve(transformData.size());
-        for (std::size_t index = 0; index < transformData.size(); ++index)
+        result.reserve(scene_.transformData.size());
+        for (std::size_t index = 0; index < scene_.transformData.size(); ++index)
         {
-            if (!instanceAlive[index])
+            if (!scene_.instanceAlive[index])
             {
                 continue;
             }
             result.push_back({
                 SceneInstanceHandle{ static_cast<std::uint32_t>(index),
-                    instanceGenerations[index] },
-                instanceNames[index],
-                transformData[index].model
+                    scene_.instanceGenerations[index] },
+                scene_.instanceNames[index],
+                scene_.transformData[index].model
             });
         }
         return result;
@@ -403,22 +262,22 @@ public:
     {
         requireInitialized("sceneMaterials");
         std::vector<SceneMaterialInfo> result;
-        result.reserve(matData.size());
-        for (std::size_t index = 0; index < matData.size(); ++index)
+        result.reserve(scene_.matData.size());
+        for (std::size_t index = 0; index < scene_.matData.size(); ++index)
         {
-            if (!materialAlive_[index])
+            if (!scene_.materialAlive_[index])
             {
                 continue;
             }
             result.push_back({
                 SceneMaterialHandle{ static_cast<std::uint32_t>(index),
-                    materialGenerations_[index] },
-                materialNames[index],
-                runtimeProperties(matData[index]),
-                runtimeTextures(matData[index]),
-                static_cast<danvulkan::assets::AlphaMode>(matData[index].materialFlags.y),
-                matData[index].materialFlags.z != 0,
-                matData[index].materialFlags.w != 0
+                    scene_.materialGenerations_[index] },
+                scene_.materialNames[index],
+                runtimeProperties(scene_.matData[index]),
+                runtimeTextures(scene_.matData[index]),
+                static_cast<danvulkan::assets::AlphaMode>(scene_.matData[index].materialFlags.y),
+                scene_.matData[index].materialFlags.z != 0,
+                scene_.matData[index].materialFlags.w != 0
             });
         }
         return result;
@@ -428,17 +287,17 @@ public:
     {
         requireInitialized("sceneTextures");
         std::vector<SceneTextureInfo> result;
-        result.reserve(textures.size());
-        for (std::size_t index = 0; index < textures.size(); ++index)
+        result.reserve(scene_.textures.size());
+        for (std::size_t index = 0; index < scene_.textures.size(); ++index)
         {
-            if (!textures[index])
+            if (!scene_.textures[index])
             {
                 continue;
             }
-            const Texture& texture = *textures[index];
+            const Texture& texture = *scene_.textures[index];
             result.push_back({
                 SceneTextureHandle{ static_cast<std::uint32_t>(index),
-                    textureGenerations_[index] },
+                    scene_.textureGenerations_[index] },
                 texture.name,
                 texture.width,
                 texture.height,
@@ -454,17 +313,17 @@ public:
     {
         requireInitialized("sceneAnimations");
         std::vector<SceneAnimationInfo> result;
-        if (!animationPlayer_)
+        if (!scene_.animationPlayer_)
         {
             return result;
         }
-        result.reserve(animationPlayer_->clipCount());
-        for (std::size_t index = 0; index < animationPlayer_->clipCount(); ++index)
+        result.reserve(scene_.animationPlayer_->clipCount());
+        for (std::size_t index = 0; index < scene_.animationPlayer_->clipCount(); ++index)
         {
             result.push_back({
-                SceneAnimationHandle{ static_cast<std::uint32_t>(index), sceneGeneration_ },
-                std::string(animationPlayer_->clipName(index)),
-                animationPlayer_->clipDuration(index)
+                SceneAnimationHandle{ static_cast<std::uint32_t>(index), scene_.sceneGeneration_ },
+                std::string(scene_.animationPlayer_->clipName(index)),
+                scene_.animationPlayer_->clipDuration(index)
             });
         }
         return result;
@@ -474,14 +333,14 @@ public:
     {
         requireInitialized("animationPlaybackState");
         AnimationPlaybackState state;
-        if (!animationPlayer_ || animationPlayer_->currentClip() ==
+        if (!scene_.animationPlayer_ || scene_.animationPlayer_->currentClip() ==
             danvulkan::AnimationPlayer::invalidClip)
         {
             return state;
         }
-        const std::size_t selected = animationPlayer_->currentClip();
-        state.clip = { static_cast<std::uint32_t>(selected), sceneGeneration_ };
-        switch (animationPlayer_->status())
+        const std::size_t selected = scene_.animationPlayer_->currentClip();
+        state.clip = { static_cast<std::uint32_t>(selected), scene_.sceneGeneration_ };
+        switch (scene_.animationPlayer_->status())
         {
         case danvulkan::AnimationPlayer::Status::stopped:
             state.status = AnimationPlaybackStatus::stopped;
@@ -496,19 +355,75 @@ public:
             state.status = AnimationPlaybackStatus::finished;
             break;
         }
-        state.positionSeconds = animationPlayer_->position();
-        state.durationSeconds = animationPlayer_->clipDuration(selected);
-        state.playbackSpeed = animationPlayer_->playbackSpeed();
-        state.looping = animationPlayer_->looping();
+        state.positionSeconds = scene_.animationPlayer_->position();
+        state.durationSeconds = scene_.animationPlayer_->clipDuration(selected);
+        state.playbackSpeed = scene_.animationPlayer_->playbackSpeed();
+        state.looping = scene_.animationPlayer_->looping();
         return state;
+    }
+
+    [[nodiscard]] RendererPerformanceStats performanceStats() const noexcept
+    {
+        return {renderedFrames_, frameCpuAvg, frameGpuAvg, animationCpuAvg_,
+            animationEvaluationCpuAvg_, animationSynchronizationCpuAvg_, cullingCpuAvg_,
+            bufferWriteCpuAvg_, commandRecordingCpuAvg_, lastActiveDrawCount_,
+            lastVisibleDrawCount_, lastAnimatedDrawCount_, lastJointMatrixCount_};
+    }
+
+    [[nodiscard]] RendererMemoryStats memoryStats() const noexcept
+    {
+        if (!allocator || !device)
+        {
+            return lastMemoryStats_;
+        }
+
+        RendererMemoryStats result;
+        VmaTotalStatistics statistics{};
+        vmaCalculateStatistics(allocator, &statistics);
+        result.blockBytes = statistics.total.statistics.blockBytes;
+        result.allocationBytes = statistics.total.statistics.allocationBytes;
+        result.blockCount = statistics.total.statistics.blockCount;
+        result.allocationCount = statistics.total.statistics.allocationCount;
+
+        std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+        vmaGetHeapBudgets(allocator, budgets.data());
+        VkPhysicalDeviceMemoryProperties memoryProperties{};
+        vkGetPhysicalDeviceMemoryProperties(device.physicalDevice(), &memoryProperties);
+        for (std::uint32_t index = 0; index < memoryProperties.memoryHeapCount; ++index)
+        {
+            result.heapUsageBytes += budgets[index].usage;
+            result.heapBudgetBytes += budgets[index].budget;
+        }
+        result.attachmentSetCount = static_cast<std::uint32_t>(attachmentTargetCount_);
+        result.msaaSamples = static_cast<std::uint32_t>(msaaSamples);
+        result.prefersLazilyAllocatedAttachments =
+            config_.memory.preferLazilyAllocatedAttachments;
+        const danvulkan::vk::UploadArenaStats uploadStats = uploadContext_.arenaStats();
+        result.stagingArenaBytes = uploadStats.capacityBytes;
+        result.stagingArenaGrowthCount = uploadStats.growthCount;
+        result.uploadSubmissionCount = uploadStats.uploadCount;
+        result.retainedCpuGeometryBytes = 0;
+        result.cpuScratchBytes = scene_.cpuScratchBytes();
+
+        peakBlockBytes_ = std::max(peakBlockBytes_, result.blockBytes);
+        peakAllocationBytes_ = std::max(peakAllocationBytes_, result.allocationBytes);
+        peakHeapUsageBytes_ = std::max(peakHeapUsageBytes_, result.heapUsageBytes);
+        peakBlockCount_ = std::max(peakBlockCount_, result.blockCount);
+        peakAllocationCount_ = std::max(peakAllocationCount_, result.allocationCount);
+        result.peakBlockBytes = peakBlockBytes_;
+        result.peakAllocationBytes = peakAllocationBytes_;
+        result.peakHeapUsageBytes = peakHeapUsageBytes_;
+        result.peakBlockCount = peakBlockCount_;
+        result.peakAllocationCount = peakAllocationCount_;
+        return result;
     }
 
     void playAnimation(SceneAnimationHandle animation, bool restart)
     {
         requireSceneUpdateAllowed("playAnimation");
         requireValidAnimation(animation, "playAnimation");
-        animationPlayer_->play(animation.slot, restart);
-        synchronizeAnimationPose();
+        scene_.animationPlayer_->play(animation.slot, restart);
+        scene_.synchronizeAnimationPose();
         animationPreviousTime_ = std::chrono::steady_clock::now();
     }
 
@@ -529,14 +444,14 @@ public:
     {
         requireSceneUpdateAllowed("stopAnimation");
         requireAnimationPlayer("stopAnimation").stop();
-        synchronizeAnimationPose();
+        scene_.synchronizeAnimationPose();
     }
 
     void seekAnimation(float positionSeconds)
     {
         requireSceneUpdateAllowed("seekAnimation");
         requireAnimationPlayer("seekAnimation").seek(positionSeconds);
-        synchronizeAnimationPose();
+        scene_.synchronizeAnimationPose();
         animationPreviousTime_ = std::chrono::steady_clock::now();
     }
 
@@ -555,18 +470,18 @@ public:
     void replaceScene(const danvulkan::assets::SceneAsset& scene)
     {
         requireSceneUpdateAllowed("replaceScene");
-        if (textureVersion_ == std::numeric_limits<std::uint64_t>::max())
+        if (scene_.textureVersion_ == std::numeric_limits<std::uint64_t>::max())
         {
             throw std::runtime_error("texture generation counter exhausted");
         }
-        if (geometryVersion_ == std::numeric_limits<std::uint64_t>::max())
+        if (scene_.geometryVersion_ == std::numeric_limits<std::uint64_t>::max())
         {
             throw std::runtime_error("geometry buffer generation counter exhausted");
         }
 
-        PreparedSceneData replacement = prepareReplacementScene(scene);
-        retiredTextures_.reserve(retiredTextures_.size() + liveTextureCount_);
-        retiredGeometry_.reserve(retiredGeometry_.size() + 1);
+        PreparedSceneData replacement = prepareSceneData(scene);
+        scene_.retiredTextures_.reserve(scene_.retiredTextures_.size() + scene_.liveTextureCount_);
+        scene_.retiredGeometry_.reserve(scene_.retiredGeometry_.size() + 1);
 
         std::vector<std::optional<Texture>> replacementTextures;
         replacementTextures.reserve(scene.textures().size());
@@ -596,11 +511,13 @@ public:
             }
             replacementVertexBuffer = createDeviceLocalBuffer(
                 sizeof(Vertex) * static_cast<VkDeviceSize>(replacement.vertexCapacity),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, replacement.vertices.data(),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, replacement.uploadVertices.data(),
+                sizeof(Vertex) * static_cast<VkDeviceSize>(replacement.uploadVertices.size()),
                 "replacement scene vertex storage buffer");
             replacementIndexBuffer = createDeviceLocalBuffer(
                 sizeof(std::uint32_t) * static_cast<VkDeviceSize>(replacement.indexCapacity),
-                VK_BUFFER_USAGE_INDEX_BUFFER_BIT, replacement.indices.data(),
+                VK_BUFFER_USAGE_INDEX_BUFFER_BIT, replacement.uploadIndices.data(),
+                sizeof(std::uint32_t) * static_cast<VkDeviceSize>(replacement.uploadIndices.size()),
                 "replacement scene index buffer");
         }
         catch (...)
@@ -609,114 +526,116 @@ public:
             throw;
         }
 
-        for (std::optional<Texture>& texture : textures)
+        for (std::optional<Texture>& texture : scene_.textures)
         {
             if (texture)
             {
-                retiredTextures_.push_back({ textureVersion_, std::move(*texture) });
+                scene_.retiredTextures_.push_back({ scene_.textureVersion_, std::move(*texture) });
             }
         }
-        textures = std::move(replacementTextures);
-        ++textureVersion_;
-        textureGenerations_.assign(textures.size(), replacement.generation);
-        freeTextureSlots_.clear();
-        liveTextureCount_ = static_cast<std::uint32_t>(textures.size());
+        scene_.textures = std::move(replacementTextures);
+        ++scene_.textureVersion_;
+        scene_.textureGenerations_.assign(scene_.textures.size(), replacement.generation);
+        scene_.freeTextureSlots_.clear();
+        scene_.liveTextureCount_ = static_cast<std::uint32_t>(scene_.textures.size());
 
-        retiredGeometry_.push_back({ geometryVersion_, std::move(vertexBuffer),
-            std::move(indexBuffer) });
-        vertexBuffer = std::move(replacementVertexBuffer);
-        indexBuffer = std::move(replacementIndexBuffer);
-        ++geometryVersion_;
+        scene_.retiredGeometry_.push_back({ scene_.geometryVersion_, std::move(scene_.vertexBuffer),
+            std::move(scene_.indexBuffer) });
+        scene_.vertexBuffer = std::move(replacementVertexBuffer);
+        scene_.indexBuffer = std::move(replacementIndexBuffer);
+        ++scene_.geometryVersion_;
 
-        sceneGeneration_ = replacement.generation;
-        vertexCapacity_ = replacement.vertexCapacity;
-        indexCapacity_ = replacement.indexCapacity;
-        vertices = std::move(replacement.vertices);
-        indices = std::move(replacement.indices);
-        freeVertexRanges_ = std::move(replacement.freeVertexRanges);
-        freeIndexRanges_ = std::move(replacement.freeIndexRanges);
-        retiredGeometryRanges_.clear();
-        geometryRangeVersion_ = 1;
-        imageGeometryRangeVersions_.assign(descriptors.setCount(), geometryRangeVersion_);
+        scene_.sceneGeneration_ = replacement.generation;
+        scene_.vertexCapacity_ = replacement.vertexCapacity;
+        scene_.indexCapacity_ = replacement.indexCapacity;
+        scene_.freeVertexRanges_ = std::move(replacement.freeVertexRanges);
+        scene_.freeIndexRanges_ = std::move(replacement.freeIndexRanges);
+        scene_.retiredGeometryRanges_.clear();
+        scene_.geometryRangeVersion_ = 1;
+        scene_.imageGeometryRangeVersions_.assign(descriptors.setCount(), scene_.geometryRangeVersion_);
 
-        matData = std::move(replacement.materials);
-        materialNames = std::move(replacement.materialNames);
-        materialGenerations_.assign(matData.size(), sceneGeneration_);
-        materialAlive_.assign(matData.size(), true);
-        freeMaterialSlots_.clear();
+        scene_.matData = std::move(replacement.materials);
+        scene_.materialNames = std::move(replacement.materialNames);
+        scene_.materialGenerations_.assign(scene_.matData.size(), scene_.sceneGeneration_);
+        scene_.materialAlive_.assign(scene_.matData.size(), true);
+        scene_.freeMaterialSlots_.clear();
 
-        meshResources = std::move(replacement.meshResources);
-        meshGenerations_.assign(meshResources.size(), sceneGeneration_);
-        meshAlive_.assign(meshResources.size(), true);
-        freeMeshSlots_.clear();
+        scene_.meshResources = std::move(replacement.meshResources);
+        scene_.meshGenerations_.assign(scene_.meshResources.size(), scene_.sceneGeneration_);
+        scene_.meshAlive_.assign(scene_.meshResources.size(), true);
+        scene_.freeMeshSlots_.clear();
 
-        transformData = std::move(replacement.transforms);
-        instanceNames = std::move(replacement.instanceNames);
-        instanceGenerations.assign(transformData.size(), sceneGeneration_);
-        instanceAlive.assign(transformData.size(), true);
-        freeInstanceSlots.clear();
-        drawData = std::move(replacement.draws);
-        meshData = std::move(replacement.meshes);
-        aabbs = std::move(replacement.bounds);
-        animationPlayer_.reset();
-        animatedDraws_.clear();
-        skinnedDraws_.clear();
-        jointMatrices_.clear();
+        scene_.transformData = std::move(replacement.transforms);
+        scene_.instanceNames = std::move(replacement.instanceNames);
+        scene_.instanceGenerations.assign(scene_.transformData.size(), scene_.sceneGeneration_);
+        scene_.instanceAlive.assign(scene_.transformData.size(), true);
+        scene_.freeInstanceSlots.clear();
+        scene_.drawData = std::move(replacement.draws);
+        scene_.meshData = std::move(replacement.meshes);
+        scene_.aabbs = std::move(replacement.bounds);
+        scene_.animationPlayer_.reset();
+        scene_.animationPlayer_ = std::move(replacement.animationPlayer);
+        scene_.animatedDraws_ = std::move(replacement.animatedDraws);
+        scene_.skinnedDraws_ = std::move(replacement.skinnedDraws);
+        scene_.jointMatrices_ = std::move(replacement.jointMatrices);
+        scene_.reserveFrameScratch();
+        captureMemoryPeak();
     }
 
     [[nodiscard]] SceneTextureHandle uploadTexture(
         const danvulkan::assets::TextureAsset& source)
     {
         requireSceneUpdateAllowed("uploadTexture");
-        if (freeTextureSlots_.empty() && textures.size() >= textureDescriptorCapacity_)
+        if (scene_.freeTextureSlots_.empty() && scene_.textures.size() >= scene_.textureDescriptorCapacity_)
         {
             throw std::runtime_error("renderer bindless texture capacity has been reached");
         }
-        if (textureVersion_ == std::numeric_limits<std::uint64_t>::max())
+        if (scene_.textureVersion_ == std::numeric_limits<std::uint64_t>::max())
         {
             throw std::runtime_error("texture generation counter exhausted");
         }
 
-        const std::uint32_t textureIndex = freeTextureSlots_.empty()
-            ? static_cast<std::uint32_t>(textures.size())
-            : freeTextureSlots_.back();
+        const std::uint32_t textureIndex = scene_.freeTextureSlots_.empty()
+            ? static_cast<std::uint32_t>(scene_.textures.size())
+            : scene_.freeTextureSlots_.back();
         Texture texture = createTextureImage(source);
         createTextureImageView(texture, textureIndex);
         createTextureSampler(texture, textureIndex);
 
-        if (textureIndex == textures.size())
+        if (textureIndex == scene_.textures.size())
         {
-            textures.emplace_back(std::move(texture));
-            textureGenerations_.push_back(sceneGeneration_);
+            scene_.textures.emplace_back(std::move(texture));
+            scene_.textureGenerations_.push_back(scene_.sceneGeneration_);
         }
         else
         {
-            textures[textureIndex].emplace(std::move(texture));
-            freeTextureSlots_.pop_back();
+            scene_.textures[textureIndex].emplace(std::move(texture));
+            scene_.freeTextureSlots_.pop_back();
         }
-        ++liveTextureCount_;
-        ++textureVersion_;
-        return { textureIndex, textureGenerations_[textureIndex] };
+        ++scene_.liveTextureCount_;
+        ++scene_.textureVersion_;
+        captureMemoryPeak();
+        return { textureIndex, scene_.textureGenerations_[textureIndex] };
     }
 
     void destroyTexture(SceneTextureHandle textureHandle)
     {
         requireSceneUpdateAllowed("destroyTexture");
         requireValidTexture(textureHandle, "destroyTexture");
-        if (liveTextureCount_ <= 1)
+        if (scene_.liveTextureCount_ <= 1)
         {
             throw std::runtime_error("cannot destroy the renderer's last fallback texture");
         }
 
         const std::int32_t textureSlot = static_cast<std::int32_t>(textureHandle.slot);
         bool referenced = false;
-        for (std::size_t index = 0; index < matData.size(); ++index)
+        for (std::size_t index = 0; index < scene_.matData.size(); ++index)
         {
-            if (!materialAlive_[index])
+            if (!scene_.materialAlive_[index])
             {
                 continue;
             }
-            const MaterialData& material = matData[index];
+            const MaterialData& material = scene_.matData[index];
             referenced = material.textureIndices.x == textureSlot ||
                 material.textureIndices.y == textureSlot ||
                 material.textureIndices.z == textureSlot ||
@@ -731,28 +650,28 @@ public:
         {
             throw std::runtime_error("cannot destroy a texture while a material references it");
         }
-        if (textureVersion_ == std::numeric_limits<std::uint64_t>::max())
+        if (scene_.textureVersion_ == std::numeric_limits<std::uint64_t>::max())
         {
             throw std::runtime_error("texture generation counter exhausted");
         }
 
-        retiredTextures_.emplace_back();
-        RetiredTexture& retired = retiredTextures_.back();
-        retired.version = textureVersion_;
-        retired.texture = std::move(*textures[textureHandle.slot]);
-        textures[textureHandle.slot].reset();
-        textureGenerations_[textureHandle.slot] = nextGeneration(
-            textureGenerations_[textureHandle.slot]);
-        freeTextureSlots_.push_back(textureHandle.slot);
-        --liveTextureCount_;
-        ++textureVersion_;
+        scene_.retiredTextures_.emplace_back();
+        RetiredTexture& retired = scene_.retiredTextures_.back();
+        retired.version = scene_.textureVersion_;
+        retired.texture = std::move(*scene_.textures[textureHandle.slot]);
+        scene_.textures[textureHandle.slot].reset();
+        scene_.textureGenerations_[textureHandle.slot] = nextGeneration(
+            scene_.textureGenerations_[textureHandle.slot]);
+        scene_.freeTextureSlots_.push_back(textureHandle.slot);
+        --scene_.liveTextureCount_;
+        ++scene_.textureVersion_;
     }
 
     [[nodiscard]] SceneMaterialHandle createMaterial(
         const RuntimeMaterialDescription& source)
     {
         requireSceneUpdateAllowed("createMaterial");
-        if (freeMaterialSlots_.empty() && matData.size() >= materialCapacity_)
+        if (scene_.freeMaterialSlots_.empty() && scene_.matData.size() >= scene_.materialCapacity_)
         {
             throw std::runtime_error("renderer material capacity has been reached");
         }
@@ -791,36 +710,36 @@ public:
             source.unlit ? 1 : 0
         };
 
-        const std::uint32_t materialIndex = freeMaterialSlots_.empty()
-            ? static_cast<std::uint32_t>(matData.size())
-            : freeMaterialSlots_.back();
+        const std::uint32_t materialIndex = scene_.freeMaterialSlots_.empty()
+            ? static_cast<std::uint32_t>(scene_.matData.size())
+            : scene_.freeMaterialSlots_.back();
         std::string materialName = source.name.empty()
             ? "runtime material " + std::to_string(materialIndex)
             : source.name;
-        if (materialIndex == matData.size())
+        if (materialIndex == scene_.matData.size())
         {
-            matData.push_back(material);
-            materialNames.push_back(std::move(materialName));
-            materialGenerations_.push_back(sceneGeneration_);
-            materialAlive_.push_back(true);
+            scene_.matData.push_back(material);
+            scene_.materialNames.push_back(std::move(materialName));
+            scene_.materialGenerations_.push_back(scene_.sceneGeneration_);
+            scene_.materialAlive_.push_back(true);
         }
         else
         {
-            matData[materialIndex] = material;
-            materialNames[materialIndex] = std::move(materialName);
-            materialAlive_[materialIndex] = true;
-            freeMaterialSlots_.pop_back();
+            scene_.matData[materialIndex] = material;
+            scene_.materialNames[materialIndex] = std::move(materialName);
+            scene_.materialAlive_[materialIndex] = true;
+            scene_.freeMaterialSlots_.pop_back();
         }
-        return { materialIndex, materialGenerations_[materialIndex] };
+        return { materialIndex, scene_.materialGenerations_[materialIndex] };
     }
 
     void destroyMaterial(SceneMaterialHandle materialHandle)
     {
         requireSceneUpdateAllowed("destroyMaterial");
         requireValidMaterial(materialHandle, "destroyMaterial");
-        for (std::size_t index = 0; index < meshResources.size(); ++index)
+        for (std::size_t index = 0; index < scene_.meshResources.size(); ++index)
         {
-            if (meshAlive_[index] && meshResources[index].materialIndex ==
+            if (scene_.meshAlive_[index] && scene_.meshResources[index].materialIndex ==
                     static_cast<std::int32_t>(materialHandle.slot))
             {
                 throw std::runtime_error(
@@ -828,31 +747,31 @@ public:
             }
         }
 
-        matData[materialHandle.slot] = {};
-        materialNames[materialHandle.slot].clear();
-        materialAlive_[materialHandle.slot] = false;
-        materialGenerations_[materialHandle.slot] = nextGeneration(
-            materialGenerations_[materialHandle.slot]);
-        freeMaterialSlots_.push_back(materialHandle.slot);
+        scene_.matData[materialHandle.slot] = {};
+        scene_.materialNames[materialHandle.slot].clear();
+        scene_.materialAlive_[materialHandle.slot] = false;
+        scene_.materialGenerations_[materialHandle.slot] = nextGeneration(
+            scene_.materialGenerations_[materialHandle.slot]);
+        scene_.freeMaterialSlots_.push_back(materialHandle.slot);
     }
 
     [[nodiscard]] std::vector<SceneMeshInfo> sceneMeshes() const
     {
         requireInitialized("sceneMeshes");
         std::vector<SceneMeshInfo> result;
-        result.reserve(meshResources.size());
-        for (std::size_t index = 0; index < meshResources.size(); ++index)
+        result.reserve(scene_.meshResources.size());
+        for (std::size_t index = 0; index < scene_.meshResources.size(); ++index)
         {
-            if (!meshAlive_[index])
+            if (!scene_.meshAlive_[index])
             {
                 continue;
             }
-            const MeshResourceData& mesh = meshResources[index];
+            const MeshResourceData& mesh = scene_.meshResources[index];
             result.push_back({
-                SceneMeshHandle{ static_cast<std::uint32_t>(index), meshGenerations_[index] },
+                SceneMeshHandle{ static_cast<std::uint32_t>(index), scene_.meshGenerations_[index] },
                 mesh.name,
                 SceneMaterialHandle{ static_cast<std::uint32_t>(mesh.materialIndex),
-                    materialGenerations_[mesh.materialIndex] },
+                    scene_.materialGenerations_[mesh.materialIndex] },
                 mesh.bounds.minVertex,
                 mesh.bounds.maxVertex
             });
@@ -886,31 +805,29 @@ public:
                 throw std::invalid_argument("uploadMesh contains an out-of-range vertex index");
             }
         }
-        if (freeMeshSlots_.empty() && meshResources.size() >=
+        if (scene_.freeMeshSlots_.empty() && scene_.meshResources.size() >=
             static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
         {
             throw std::runtime_error("renderer mesh handle capacity has been reached");
         }
 
-        const std::uint32_t meshSlot = freeMeshSlots_.empty()
-            ? static_cast<std::uint32_t>(meshResources.size())
-            : freeMeshSlots_.back();
+        const std::uint32_t meshSlot = scene_.freeMeshSlots_.empty()
+            ? static_cast<std::uint32_t>(scene_.meshResources.size())
+            : scene_.freeMeshSlots_.back();
         const std::uint32_t vertexCount = static_cast<std::uint32_t>(sourceVertices.size());
         const std::uint32_t indexCount = static_cast<std::uint32_t>(sourceIndices.size());
 
         ensureGeometryCapacity(vertexCount, indexCount);
-        const GeometryRange vertexRange = allocateGeometryRange(freeVertexRanges_, vertexCount);
-        const GeometryRange indexRange = allocateGeometryRange(freeIndexRanges_, indexCount);
-        std::ranges::copy(sourceVertices, vertices.begin() + vertexRange.offset);
-        std::ranges::copy(sourceIndices, indices.begin() + indexRange.offset);
+        const GeometryRange vertexRange = scene_.allocateGeometryRange(scene_.freeVertexRanges_, vertexCount);
+        const GeometryRange indexRange = scene_.allocateGeometryRange(scene_.freeIndexRanges_, indexCount);
         try
         {
-            uploadDeviceLocalBufferRange(vertexBuffer,
+            uploadDeviceLocalBufferRange(scene_.vertexBuffer,
                 sizeof(Vertex) * static_cast<VkDeviceSize>(vertexRange.offset),
                 sizeof(Vertex) * static_cast<VkDeviceSize>(vertexRange.count),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, sourceVertices.data(),
                 "runtime vertex range");
-            uploadDeviceLocalBufferRange(indexBuffer,
+            uploadDeviceLocalBufferRange(scene_.indexBuffer,
                 sizeof(std::uint32_t) * static_cast<VkDeviceSize>(indexRange.offset),
                 sizeof(std::uint32_t) * static_cast<VkDeviceSize>(indexRange.count),
                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sourceIndices.data(),
@@ -918,8 +835,8 @@ public:
         }
         catch (...)
         {
-            releaseGeometryRange(freeVertexRanges_, vertexRange);
-            releaseGeometryRange(freeIndexRanges_, indexRange);
+            scene_.releaseGeometryRange(scene_.freeVertexRanges_, vertexRange);
+            scene_.releaseGeometryRange(scene_.freeIndexRanges_, indexRange);
             throw;
         }
 
@@ -937,34 +854,36 @@ public:
         mesh.firstIndex = indexRange.offset;
         mesh.vertexOffset = vertexRange.offset;
         mesh.materialIndex = static_cast<std::int32_t>(materialHandle.slot);
-        const MaterialData& material = matData[materialHandle.slot];
+        const MaterialData& material = scene_.matData[materialHandle.slot];
         mesh.pipelineVariant = static_cast<std::uint32_t>(material.materialFlags.y * 2 +
             material.materialFlags.z);
         mesh.bounds = bounds;
         mesh.name = name.empty()
             ? "runtime mesh " + std::to_string(meshSlot)
             : std::move(name);
-        if (meshSlot == meshResources.size())
+        if (meshSlot == scene_.meshResources.size())
         {
-            meshResources.push_back(std::move(mesh));
-            meshGenerations_.push_back(sceneGeneration_);
-            meshAlive_.push_back(true);
+            scene_.meshResources.push_back(std::move(mesh));
+            scene_.meshGenerations_.push_back(scene_.sceneGeneration_);
+            scene_.meshAlive_.push_back(true);
         }
         else
         {
-            meshResources[meshSlot] = std::move(mesh);
-            meshAlive_[meshSlot] = true;
-            freeMeshSlots_.pop_back();
+            scene_.meshResources[meshSlot] = std::move(mesh);
+            scene_.meshAlive_[meshSlot] = true;
+            scene_.freeMeshSlots_.pop_back();
         }
 
-        return { meshSlot, meshGenerations_[meshSlot] };
+        scene_.reserveFrameScratch();
+        captureMemoryPeak();
+        return { meshSlot, scene_.meshGenerations_[meshSlot] };
     }
 
     void destroyMesh(SceneMeshHandle meshHandle)
     {
         requireSceneUpdateAllowed("destroyMesh");
         requireValidMesh(meshHandle, "destroyMesh");
-        const bool referenced = std::ranges::any_of(meshData,
+        const bool referenced = std::ranges::any_of(scene_.meshData,
             [&](const MeshData& mesh)
             {
                 return mesh.meshResourceSlot == meshHandle.slot;
@@ -973,22 +892,22 @@ public:
         {
             throw std::runtime_error("cannot destroy a mesh while an instance references it");
         }
-        if (geometryRangeVersion_ == std::numeric_limits<std::uint64_t>::max())
+        if (scene_.geometryRangeVersion_ == std::numeric_limits<std::uint64_t>::max())
         {
             throw std::runtime_error("geometry range retirement counter exhausted");
         }
 
-        const MeshResourceData& resource = meshResources[meshHandle.slot];
-        retiredGeometryRanges_.push_back({
-            geometryRangeVersion_,
+        const MeshResourceData& resource = scene_.meshResources[meshHandle.slot];
+        scene_.retiredGeometryRanges_.push_back({
+            scene_.geometryRangeVersion_,
             { resource.vertexOffset, resource.vertexCount },
             { resource.firstIndex, resource.indexCount }
         });
-        ++geometryRangeVersion_;
-        meshResources[meshHandle.slot] = {};
-        meshAlive_[meshHandle.slot] = false;
-        meshGenerations_[meshHandle.slot] = nextGeneration(meshGenerations_[meshHandle.slot]);
-        freeMeshSlots_.push_back(meshHandle.slot);
+        ++scene_.geometryRangeVersion_;
+        scene_.meshResources[meshHandle.slot] = {};
+        scene_.meshAlive_[meshHandle.slot] = false;
+        scene_.meshGenerations_[meshHandle.slot] = nextGeneration(scene_.meshGenerations_[meshHandle.slot]);
+        scene_.freeMeshSlots_.push_back(meshHandle.slot);
     }
 
     [[nodiscard]] SceneInstanceHandle createMeshInstance(SceneMeshHandle meshHandle,
@@ -996,35 +915,35 @@ public:
     {
         requireSceneUpdateAllowed("createMeshInstance");
         requireValidMesh(meshHandle, "createMeshInstance");
-        if (meshData.size() >= DrawDataCount)
+        if (scene_.meshData.size() >= DrawDataCount)
         {
             throw std::runtime_error("renderer instance draw capacity has been reached");
         }
 
         std::uint32_t instanceSlot = 0;
-        if (!freeInstanceSlots.empty())
+        if (!scene_.freeInstanceSlots.empty())
         {
-            instanceSlot = freeInstanceSlots.back();
-            freeInstanceSlots.pop_back();
+            instanceSlot = scene_.freeInstanceSlots.back();
+            scene_.freeInstanceSlots.pop_back();
         }
         else
         {
-            if (transformData.size() >= TransformDataCount)
+            if (scene_.transformData.size() >= TransformDataCount)
             {
                 throw std::runtime_error("renderer instance transform capacity has been reached");
             }
-            instanceSlot = static_cast<std::uint32_t>(transformData.size());
-            transformData.push_back({});
-            instanceNames.emplace_back();
-            instanceGenerations.push_back(sceneGeneration_);
-            instanceAlive.push_back(false);
+            instanceSlot = static_cast<std::uint32_t>(scene_.transformData.size());
+            scene_.transformData.push_back({});
+            scene_.instanceNames.emplace_back();
+            scene_.instanceGenerations.push_back(scene_.sceneGeneration_);
+            scene_.instanceAlive.push_back(false);
         }
 
-        transformData[instanceSlot].model = worldTransform;
-        instanceNames[instanceSlot] = name.empty() ? meshResources[meshHandle.slot].name : std::move(name);
-        instanceAlive[instanceSlot] = true;
+        scene_.transformData[instanceSlot].model = worldTransform;
+        scene_.instanceNames[instanceSlot] = name.empty() ? scene_.meshResources[meshHandle.slot].name : std::move(name);
+        scene_.instanceAlive[instanceSlot] = true;
 
-        const MeshResourceData& resource = meshResources[meshHandle.slot];
+        const MeshResourceData& resource = scene_.meshResources[meshHandle.slot];
         DrawData draw{};
         draw.materialIndex = resource.materialIndex;
         draw.transformIndex = static_cast<std::int32_t>(instanceSlot);
@@ -1038,10 +957,10 @@ public:
         mesh.meshResourceSlot = meshHandle.slot;
         mesh.drawData = draw;
         mesh.localBounds = resource.bounds;
-        meshData.push_back(mesh);
-        aabbs.push_back(transformedBounds(resource.bounds, worldTransform));
+        scene_.meshData.push_back(mesh);
+        scene_.aabbs.push_back(scene_.transformedBounds(resource.bounds, worldTransform));
 
-        return { instanceSlot, instanceGenerations[instanceSlot] };
+        return { instanceSlot, scene_.instanceGenerations[instanceSlot] };
     }
 
     void destroyInstance(SceneInstanceHandle instanceHandle)
@@ -1049,21 +968,21 @@ public:
         requireSceneUpdateAllowed("destroyInstance");
         requireValidInstance(instanceHandle, "destroyInstance");
 
-        for (std::size_t index = meshData.size(); index-- > 0;)
+        for (std::size_t index = scene_.meshData.size(); index-- > 0;)
         {
-            if (meshData[index].drawData.transformIndex ==
+            if (scene_.meshData[index].drawData.transformIndex ==
                 static_cast<std::int32_t>(instanceHandle.slot))
             {
-                meshData.erase(meshData.begin() + static_cast<std::ptrdiff_t>(index));
-                aabbs.erase(aabbs.begin() + static_cast<std::ptrdiff_t>(index));
+                scene_.meshData.erase(scene_.meshData.begin() + static_cast<std::ptrdiff_t>(index));
+                scene_.aabbs.erase(scene_.aabbs.begin() + static_cast<std::ptrdiff_t>(index));
             }
         }
 
-        instanceAlive[instanceHandle.slot] = false;
-        instanceNames[instanceHandle.slot].clear();
-        instanceGenerations[instanceHandle.slot] = nextGeneration(
-            instanceGenerations[instanceHandle.slot]);
-        freeInstanceSlots.push_back(instanceHandle.slot);
+        scene_.instanceAlive[instanceHandle.slot] = false;
+        scene_.instanceNames[instanceHandle.slot].clear();
+        scene_.instanceGenerations[instanceHandle.slot] = nextGeneration(
+            scene_.instanceGenerations[instanceHandle.slot]);
+        scene_.freeInstanceSlots.push_back(instanceHandle.slot);
     }
 
     void updateInstanceTransform(SceneInstanceHandle instanceHandle, const glm::mat4& worldTransform)
@@ -1071,13 +990,13 @@ public:
         requireSceneUpdateAllowed("updateInstanceTransform");
         requireValidInstance(instanceHandle, "updateInstanceTransform");
 
-        transformData[instanceHandle.slot].model = worldTransform;
-        for (std::size_t index = 0; index < meshData.size(); ++index)
+        scene_.transformData[instanceHandle.slot].model = worldTransform;
+        for (std::size_t index = 0; index < scene_.meshData.size(); ++index)
         {
-            if (meshData[index].drawData.transformIndex ==
+            if (scene_.meshData[index].drawData.transformIndex ==
                 static_cast<std::int32_t>(instanceHandle.slot))
             {
-                aabbs[index] = transformedBounds(meshData[index].localBounds, worldTransform);
+                scene_.aabbs[index] = scene_.transformedBounds(scene_.meshData[index].localBounds, worldTransform);
             }
         }
     }
@@ -1088,7 +1007,7 @@ public:
         requireSceneUpdateAllowed("updateMaterialProperties");
         requireValidMaterial(material, "updateMaterialProperties");
 
-        MaterialData& destination = matData[material.slot];
+        MaterialData& destination = scene_.matData[material.slot];
         destination.baseColorFactor = properties.baseColorFactor;
         destination.emissiveMetallic = glm::vec4(properties.emissiveFactor,
             properties.metallicFactor);
@@ -1107,7 +1026,7 @@ public:
         requireSceneUpdateAllowed("updateMaterialTextures");
         requireValidMaterial(materialHandle, "updateMaterialTextures");
 
-        MaterialData& destination = matData[materialHandle.slot];
+        MaterialData& destination = scene_.matData[materialHandle.slot];
         destination.textureIndices = {
             textureIndex(source.baseColor, "base-color"),
             textureIndex(source.normal, "normal"),
@@ -1182,53 +1101,14 @@ private:
     danvulkan::vk::DeviceContext device;
     danvulkan::vk::Allocator allocator;
     danvulkan::vk::SwapchainContext swapchain;
+    danvulkan::vk::AttachmentContext attachments;
+    danvulkan::vk::PresentationContext presentation;
     danvulkan::vk::DescriptorContext descriptors;
+    danvulkan::vk::PipelineContext pipelines;
+    // Declared after the device and allocator so scene-owned Vulkan resources retire first.
+    danvulkan::vk::SceneContext scene_;
 
-    std::vector<Vertex> vertices;
-    std::vector<uint32_t> indices;
-    std::uint32_t vertexCapacity_ = 0;
-    std::uint32_t indexCapacity_ = 0;
-    std::vector<GeometryRange> freeVertexRanges_;
-    std::vector<GeometryRange> freeIndexRanges_;
-    std::uint64_t geometryRangeVersion_ = 1;
-    std::vector<std::uint64_t> imageGeometryRangeVersions_;
-    std::vector<RetiredGeometryRanges> retiredGeometryRanges_;
-    std::vector<MaterialData> matData;
-    std::vector<TransformData> transformData;
-    std::vector<std::string> materialNames;
-    std::vector<std::uint32_t> materialGenerations_;
-    std::vector<bool> materialAlive_;
-    std::vector<std::uint32_t> freeMaterialSlots_;
-    std::vector<std::string> instanceNames;
-    std::vector<std::uint32_t> instanceGenerations;
-    std::vector<bool> instanceAlive;
-    std::vector<std::uint32_t> freeInstanceSlots;
-    std::vector<MeshResourceData> meshResources;
-    std::vector<std::uint32_t> meshGenerations_;
-    std::vector<bool> meshAlive_;
-    std::vector<std::uint32_t> freeMeshSlots_;
-    std::vector<DrawData> drawData;
-    std::vector<MeshData> meshData;
-    std::vector<AABB> aabbs;
-    std::optional<danvulkan::AnimationPlayer> animationPlayer_;
-    std::vector<AnimatedDrawState> animatedDraws_;
-    std::vector<SkinnedDrawState> skinnedDraws_;
-    std::vector<glm::mat4> jointMatrices_;
-    std::vector<std::optional<Texture>> textures;
-    std::vector<std::uint32_t> textureGenerations_;
-    std::vector<std::uint32_t> freeTextureSlots_;
-    std::vector<RetiredTexture> retiredTextures_;
-    std::uint32_t liveTextureCount_ = 0;
-    std::uint32_t materialCapacity_ = 0;
-    std::uint32_t textureDescriptorCapacity_ = 0;
-    std::uint64_t textureVersion_ = 1;
-    std::vector<std::uint64_t> imageTextureVersions_;
     std::vector<PointLight> pointLights;
-    std::uint32_t sceneGeneration_ = 0;
-
-    std::vector<VkDrawIndexedIndirectCommand> indirectCommands;
-    std::array<DrawBatch, PipelineVariantCount> drawBatches{};
-    std::vector<danvulkan::vk::Buffer> indirectCommandsBuffer;
 
     const std::string MODEL_PATH;
     const std::string TEXTURE_PATH = "textures/viking_room.png";
@@ -1248,36 +1128,23 @@ private:
 #endif
     
 
-    VkQueryPool queryPoolTimestamp = VK_NULL_HANDLE;
     float timestampPeriod = 0.0f;
     VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT;
+    std::size_t attachmentTargetCount_ = 0;
+    RendererMemoryStats lastMemoryStats_{};
+    mutable std::uint64_t peakBlockBytes_ = 0;
+    mutable std::uint64_t peakAllocationBytes_ = 0;
+    mutable std::uint64_t peakHeapUsageBytes_ = 0;
+    mutable std::uint32_t peakBlockCount_ = 0;
+    mutable std::uint32_t peakAllocationCount_ = 0;
 
-    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    
-    std::array<VkPipeline, PipelineVariantCount> graphicsPipelines{};
-
-    std::array<FrameResources, MAX_FRAMES_IN_FLIGHT> frames;
+    std::array<danvulkan::vk::FrameContext, MAX_FRAMES_IN_FLIGHT> frames;
     danvulkan::vk::UploadContext uploadContext_;
-    std::vector<VkSemaphore> renderFinishedSemaphores;
-    std::vector<VkFence> imagesInFlight;
 
     size_t currentFrame = 0;
 
-    danvulkan::vk::Buffer indexBuffer;
-    danvulkan::vk::Buffer vertexBuffer;
-    std::uint64_t geometryVersion_ = 1;
-    std::vector<std::uint64_t> imageGeometryVersions_;
-    std::vector<RetiredGeometry> retiredGeometry_;
-
-    std::vector<danvulkan::vk::Image> depthImages;
-    std::vector<danvulkan::vk::Image> colorImages;
-
     // One per swap chain image
     std::vector<danvulkan::vk::Buffer> uniformBuffers;
-    std::vector<danvulkan::vk::Buffer> matBuffers;
-    std::vector<danvulkan::vk::Buffer> transformBuffers;
-    std::vector<danvulkan::vk::Buffer> drawBuffers;
-    std::vector<danvulkan::vk::Buffer> jointBuffers;
 
     Camera camera;
     glm::mat4 view;
@@ -1300,6 +1167,33 @@ private:
 
     double frameGpuAvg = 0.0;
     double frameCpuAvg = 0.0;
+    double animationCpuAvg_ = 0.0;
+    double animationEvaluationCpuAvg_ = 0.0;
+    double animationSynchronizationCpuAvg_ = 0.0;
+    double cullingCpuAvg_ = 0.0;
+    double bufferWriteCpuAvg_ = 0.0;
+    double commandRecordingCpuAvg_ = 0.0;
+    std::uint32_t lastActiveDrawCount_ = 0;
+    std::uint32_t lastVisibleDrawCount_ = 0;
+    std::uint32_t lastAnimatedDrawCount_ = 0;
+    std::uint32_t lastJointMatrixCount_ = 0;
+
+    [[nodiscard]] static double millisecondsSince(
+        std::chrono::steady_clock::time_point begin) noexcept
+    {
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - begin).count();
+    }
+
+    [[nodiscard]] static double rollingAverage(double current, double sample) noexcept
+    {
+        return current == 0.0 ? sample : current * 0.95 + sample * 0.05;
+    }
+
+    void captureMemoryPeak() const noexcept
+    {
+        static_cast<void>(memoryStats());
+    }
 
     void initPlatform()
     {
@@ -1317,50 +1211,59 @@ private:
         createSurface();
         device.initialize(instance, surface, enableValidationLayers);
         timestampPeriod = device.properties().limits.timestampPeriod;
-        msaaSamples = device.maxUsableSampleCount();
+        const VkSampleCountFlags supportedSamples =
+            device.properties().limits.framebufferColorSampleCounts &
+            device.properties().limits.framebufferDepthSampleCounts;
+        const std::optional<danvulkan::vk::MemoryPolicyPlan> memoryPlan =
+            danvulkan::vk::planMemoryPolicy(supportedSamples,
+                config_.memory.maxMsaaSamples, frames.size(),
+                config_.memory.preferLazilyAllocatedAttachments);
+        if (!memoryPlan)
+        {
+            throw std::invalid_argument("renderer memory policy is invalid for this device");
+        }
+        msaaSamples = memoryPlan->samples;
+        attachmentTargetCount_ = memoryPlan->attachmentSetCount;
         createAllocator();
         const RendererFramebufferExtent framebuffer = platform_->framebufferExtent();
         swapchain.initialize(device, surface, { framebuffer.width, framebuffer.height },
             enableValidationLayers);
-        createCommandPool();
+        createFrameContexts();
         createUploadContext();
-        createQueryPool();
         loadModel();
         createDescriptorSetLayout();
         createGraphicsPipeline();
-        createColorResources();
-        createDepthResources();
+        createSwapchainAttachments();
         createTextureImageViews();
         createTextureSamplers();
-        createVertexBuffer();
-        createIndexBuffer();
         createUniformBuffers();
         createBindlessBuffers();
         updateIndirectBuffer();
         createDescriptorSets();
-        createCommandBuffers();
-        createSyncObjects();
+        presentation.initialize(device, swapchain.imageCount(), enableValidationLayers);
         //createIMGUI();
         initGame();
+        captureMemoryPeak();
     }
 
-    void recreateSwapChain()
+    bool recreateSwapChain()
     {
-        // Handle minimized window, which has a framebuffer size of 0
-        // we just pause until window in the foreground again
         RendererFramebufferExtent extent = platform_->framebufferExtent();
         while (extent.width == 0 || extent.height == 0)
         {
+            if (platform_->shouldClose())
+            {
+                return false;
+            }
             platform_->waitEvents();
             extent = platform_->framebufferExtent();
         }
-        vkDeviceWaitIdle(device); // don't touch resources that may still be in use
-        const std::size_t previousImageCount = swapchain.imageCount();
-        cleanupSwapChain(false);
 
+        waitForSwapchainRetirement();
+        const std::size_t previousImageCount = swapchain.imageCount();
         swapchain.recreate(device, surface, { extent.width, extent.height },
             enableValidationLayers);
-        imagesInFlight.assign(swapchain.imageCount(), VK_NULL_HANDLE);
+        presentation.recreate(swapchain.imageCount(), enableValidationLayers);
         if (swapchain.imageCount() != previousImageCount)
         {
             rebuildSwapchainIndexedResources();
@@ -1368,9 +1271,22 @@ private:
         camera.updateAspectRatio(
             swapchain.extent().width / static_cast<float>(swapchain.extent().height));
         createGraphicsPipeline();
-        createDepthResources();
-        createColorResources();
-        createCommandBuffers();
+        recreateSwapchainAttachments();
+        return true;
+    }
+
+    void waitForSwapchainRetirement()
+    {
+        for (danvulkan::vk::FrameContext& frame : frames)
+        {
+            if (const std::optional<double> gpuMilliseconds =
+                    frame.waitForReuse(timestampPeriod))
+            {
+                frameGpuAvg = frameGpuAvg * 0.95 + *gpuMilliseconds * 0.05;
+            }
+        }
+        checkVk(vkQueueWaitIdle(device.presentQueue()),
+            "vkQueueWaitIdle(swapchain presentation retirement)");
     }
 
     void requireInitialized(std::string_view operation) const
@@ -1407,12 +1323,12 @@ private:
     [[nodiscard]] std::uint32_t nextSceneGeneration() const
     {
         std::unordered_set<std::uint32_t> generations;
-        generations.insert(instanceGenerations.begin(), instanceGenerations.end());
-        generations.insert(materialGenerations_.begin(), materialGenerations_.end());
-        generations.insert(meshGenerations_.begin(), meshGenerations_.end());
-        generations.insert(textureGenerations_.begin(), textureGenerations_.end());
+        generations.insert(scene_.instanceGenerations.begin(), scene_.instanceGenerations.end());
+        generations.insert(scene_.materialGenerations_.begin(), scene_.materialGenerations_.end());
+        generations.insert(scene_.meshGenerations_.begin(), scene_.meshGenerations_.end());
+        generations.insert(scene_.textureGenerations_.begin(), scene_.textureGenerations_.end());
 
-        std::uint32_t candidate = nextGeneration(sceneGeneration_);
+        std::uint32_t candidate = nextGeneration(scene_.sceneGeneration_);
         for (std::size_t attempt = 0; attempt <= generations.size(); ++attempt)
         {
             if (!generations.contains(candidate))
@@ -1424,90 +1340,12 @@ private:
         throw std::runtime_error("scene generation counter exhausted");
     }
 
-    [[nodiscard]] static bool hasGeometryRange(const std::vector<GeometryRange>& ranges,
-        std::uint32_t count) noexcept
-    {
-        return std::ranges::any_of(ranges, [count](const GeometryRange& range)
-        {
-            return range.count >= count;
-        });
-    }
-
-    [[nodiscard]] static GeometryRange allocateGeometryRange(
-        std::vector<GeometryRange>& ranges, std::uint32_t count)
-    {
-        for (auto range = ranges.begin(); range != ranges.end(); ++range)
-        {
-            if (range->count < count)
-            {
-                continue;
-            }
-            const GeometryRange allocation{ range->offset, count };
-            range->offset += count;
-            range->count -= count;
-            if (range->count == 0)
-            {
-                ranges.erase(range);
-            }
-            return allocation;
-        }
-        throw std::runtime_error("geometry range allocation failed after capacity planning");
-    }
-
-    static void releaseGeometryRange(std::vector<GeometryRange>& ranges,
-        GeometryRange released)
-    {
-        if (released.count == 0)
-        {
-            return;
-        }
-        ranges.push_back(released);
-        std::ranges::sort(ranges, {}, &GeometryRange::offset);
-
-        std::vector<GeometryRange> merged;
-        merged.reserve(ranges.size());
-        for (const GeometryRange range : ranges)
-        {
-            if (merged.empty())
-            {
-                merged.push_back(range);
-                continue;
-            }
-            GeometryRange& previous = merged.back();
-            const std::uint64_t previousEnd = static_cast<std::uint64_t>(previous.offset) +
-                previous.count;
-            const std::uint64_t rangeEnd = static_cast<std::uint64_t>(range.offset) + range.count;
-            if (range.offset > previousEnd)
-            {
-                merged.push_back(range);
-                continue;
-            }
-            previous.count = static_cast<std::uint32_t>(
-                std::max(previousEnd, rangeEnd) - previous.offset);
-        }
-        ranges = std::move(merged);
-    }
-
-    [[nodiscard]] static std::uint32_t grownGeometryCapacity(std::uint32_t current,
-        std::uint32_t requiredContiguousCount, std::uint32_t maximum)
-    {
-        const std::uint64_t doubled = std::max<std::uint64_t>(1, current) * 2;
-        const std::uint64_t required = static_cast<std::uint64_t>(current) +
-            requiredContiguousCount;
-        const std::uint64_t result = std::max(doubled, required);
-        if (result > maximum)
-        {
-            throw std::runtime_error("geometry capacity exceeds renderer offset limits");
-        }
-        return static_cast<std::uint32_t>(result);
-    }
-
     void requireValidInstance(SceneInstanceHandle instanceHandle,
         std::string_view operation) const
     {
-        if (instanceHandle.slot >= transformData.size() ||
-            !instanceAlive[instanceHandle.slot] ||
-            instanceHandle.generation != instanceGenerations[instanceHandle.slot])
+        if (instanceHandle.slot >= scene_.transformData.size() ||
+            !scene_.instanceAlive[instanceHandle.slot] ||
+            instanceHandle.generation != scene_.instanceGenerations[instanceHandle.slot])
         {
             throw std::invalid_argument(std::string(operation) +
                 " received an invalid or stale instance handle");
@@ -1517,10 +1355,10 @@ private:
     void requireValidTexture(SceneTextureHandle textureHandle,
         std::string_view operation) const
     {
-        if (textureHandle.slot >= textures.size() ||
-            !textures[textureHandle.slot] ||
-            textureHandle.slot >= textureGenerations_.size() ||
-            textureHandle.generation != textureGenerations_[textureHandle.slot])
+        if (textureHandle.slot >= scene_.textures.size() ||
+            !scene_.textures[textureHandle.slot] ||
+            textureHandle.slot >= scene_.textureGenerations_.size() ||
+            textureHandle.generation != scene_.textureGenerations_[textureHandle.slot])
         {
             throw std::invalid_argument(std::string(operation) +
                 " received an invalid or stale texture handle");
@@ -1530,11 +1368,11 @@ private:
     void requireValidMaterial(SceneMaterialHandle materialHandle,
         std::string_view operation) const
     {
-        if (materialHandle.slot >= matData.size() ||
-            materialHandle.slot >= materialAlive_.size() ||
-            !materialAlive_[materialHandle.slot] ||
-            materialHandle.slot >= materialGenerations_.size() ||
-            materialHandle.generation != materialGenerations_[materialHandle.slot])
+        if (materialHandle.slot >= scene_.matData.size() ||
+            materialHandle.slot >= scene_.materialAlive_.size() ||
+            !scene_.materialAlive_[materialHandle.slot] ||
+            materialHandle.slot >= scene_.materialGenerations_.size() ||
+            materialHandle.generation != scene_.materialGenerations_[materialHandle.slot])
         {
             throw std::invalid_argument(std::string(operation) +
                 " received an invalid or stale material handle");
@@ -1544,11 +1382,11 @@ private:
     void requireValidMesh(SceneMeshHandle meshHandle,
         std::string_view operation) const
     {
-        if (meshHandle.slot >= meshResources.size() ||
-            meshHandle.slot >= meshAlive_.size() ||
-            !meshAlive_[meshHandle.slot] ||
-            meshHandle.slot >= meshGenerations_.size() ||
-            meshHandle.generation != meshGenerations_[meshHandle.slot])
+        if (meshHandle.slot >= scene_.meshResources.size() ||
+            meshHandle.slot >= scene_.meshAlive_.size() ||
+            !scene_.meshAlive_[meshHandle.slot] ||
+            meshHandle.slot >= scene_.meshGenerations_.size() ||
+            meshHandle.generation != scene_.meshGenerations_[meshHandle.slot])
         {
             throw std::invalid_argument(std::string(operation) +
                 " received an invalid or stale mesh handle");
@@ -1558,19 +1396,19 @@ private:
     [[nodiscard]] danvulkan::AnimationPlayer& requireAnimationPlayer(
         std::string_view operation)
     {
-        if (!animationPlayer_ || animationPlayer_->clipCount() == 0)
+        if (!scene_.animationPlayer_ || scene_.animationPlayer_->clipCount() == 0)
         {
             throw std::logic_error(std::string(operation) +
                 " requires a scene containing animation clips");
         }
-        return *animationPlayer_;
+        return *scene_.animationPlayer_;
     }
 
     void requireValidAnimation(SceneAnimationHandle animation,
         std::string_view operation) const
     {
-        if (!animationPlayer_ || animation.generation != sceneGeneration_ ||
-            animation.slot >= animationPlayer_->clipCount())
+        if (!scene_.animationPlayer_ || animation.generation != scene_.sceneGeneration_ ||
+            animation.slot >= scene_.animationPlayer_->clipCount())
         {
             throw std::invalid_argument(std::string(operation) +
                 " received an invalid or stale animation handle");
@@ -1593,13 +1431,13 @@ private:
 
     [[nodiscard]] SceneTextureHandle textureHandle(std::int32_t textureIndex) const noexcept
     {
-        if (textureIndex < 0 || static_cast<std::size_t>(textureIndex) >= textures.size() ||
-            !textures[textureIndex] || static_cast<std::size_t>(textureIndex) >=
-                textureGenerations_.size())
+        if (textureIndex < 0 || static_cast<std::size_t>(textureIndex) >= scene_.textures.size() ||
+            !scene_.textures[textureIndex] || static_cast<std::size_t>(textureIndex) >=
+                scene_.textureGenerations_.size())
         {
             return {};
         }
-        return { static_cast<std::uint32_t>(textureIndex), textureGenerations_[textureIndex] };
+        return { static_cast<std::uint32_t>(textureIndex), scene_.textureGenerations_[textureIndex] };
     }
 
     [[nodiscard]] RuntimeMaterialTextures runtimeTextures(const MaterialData& material) const noexcept
@@ -1620,32 +1458,14 @@ private:
         {
             return -1;
         }
-        if (texture.slot >= textures.size() || !textures[texture.slot] ||
-            texture.slot >= textureGenerations_.size() ||
-            texture.generation != textureGenerations_[texture.slot])
+        if (texture.slot >= scene_.textures.size() || !scene_.textures[texture.slot] ||
+            texture.slot >= scene_.textureGenerations_.size() ||
+            texture.generation != scene_.textureGenerations_[texture.slot])
         {
             throw std::invalid_argument("invalid or stale " + std::string(role) +
                 " texture handle");
         }
         return static_cast<std::int32_t>(texture.slot);
-    }
-
-    [[nodiscard]] static AABB transformedBounds(const AABB& bounds, const glm::mat4& transform)
-    {
-        const float maximum = std::numeric_limits<float>::max();
-        AABB result{ glm::vec3(maximum), glm::vec3(-maximum) };
-        for (std::uint32_t corner = 0; corner < 8; ++corner)
-        {
-            const glm::vec3 local{
-                (corner & 1U) != 0 ? bounds.maxVertex.x : bounds.minVertex.x,
-                (corner & 2U) != 0 ? bounds.maxVertex.y : bounds.minVertex.y,
-                (corner & 4U) != 0 ? bounds.maxVertex.z : bounds.minVertex.z
-            };
-            const glm::vec3 world = glm::vec3(transform * glm::vec4(local, 1.0f));
-            result.minVertex = glm::min(result.minVertex, world);
-            result.maxVertex = glm::max(result.maxVertex, world);
-        }
-        return result;
     }
 
     void updateWindowTitle()
@@ -1685,72 +1505,25 @@ private:
         shutdown_ = true;
     }
 
-    void cleanupSwapChain(bool releaseSwapchain = true)
+    void cleanupSwapChain()
     {
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-        {
-            vkFreeCommandBuffers(device, frames[i].commandPool, 1, &frames[i].commandBuffer);
-        }
-        for (VkPipeline& pipeline : graphicsPipelines)
-        {
-            vkDestroyPipeline(device, pipeline, nullptr);
-            pipeline = VK_NULL_HANDLE;
-        }
-        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        pipelineLayout = VK_NULL_HANDLE;
-        colorImages.clear();
-        depthImages.clear();
-        if (releaseSwapchain)
-        {
-            swapchain.reset();
-        }
+        attachments.reset();
+        presentation.reset();
+        swapchain.reset();
     }
     void cleanup() 
     {
+        lastMemoryStats_ = memoryStats();
         cleanupSwapChain();
+        pipelines.reset();
         descriptors.reset();
-        vkDestroyQueryPool(device, queryPoolTimestamp, nullptr);
-        matBuffers.clear();
-        drawBuffers.clear();
-        transformBuffers.clear();
-        jointBuffers.clear();
         uniformBuffers.clear();
-        indirectCommandsBuffer.clear();
-        for (std::optional<Texture>& texture : textures)
-        {
-            if (texture)
-            {
-                vkDestroySampler(device, texture->sampler, nullptr);
-                texture->sampler = VK_NULL_HANDLE;
-            }
-        }
-        for (RetiredTexture& retired : retiredTextures_)
-        {
-            vkDestroySampler(device, retired.texture.sampler, nullptr);
-            retired.texture.sampler = VK_NULL_HANDLE;
-        }
-        textures.clear();
-        textureGenerations_.clear();
-        freeTextureSlots_.clear();
-        retiredTextures_.clear();
-        liveTextureCount_ = 0;
-        imageTextureVersions_.clear();
-        retiredGeometry_.clear();
-        imageGeometryVersions_.clear();
-        retiredGeometryRanges_.clear();
-        imageGeometryRangeVersions_.clear();
-        freeVertexRanges_.clear();
-        freeIndexRanges_.clear();
-        vertexBuffer.reset();
-        indexBuffer.reset();
+        scene_.resetScene(device);
         
         
-        destroySwapchainSyncObjects();
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        for (danvulkan::vk::FrameContext& frame : frames)
         {
-            vkDestroySemaphore(device, frames[i].imageAvailable, nullptr);
-            vkDestroyFence(device, frames[i].inFlight, nullptr);
-            vkDestroyCommandPool(device, frames[i].commandPool, nullptr);
+            frame.reset();
         }
         uploadContext_.reset();
         allocator.reset();
@@ -1764,23 +1537,7 @@ private:
     void recreateGraphicsPipeline()
     {
         vkDeviceWaitIdle(device); // don't touch resources that may still be in use
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-        {
-            vkFreeCommandBuffers(device, frames[i].commandPool, 1, &frames[i].commandBuffer);
-        }        
-        for (VkPipeline& pipeline : graphicsPipelines)
-        {
-            vkDestroyPipeline(device, pipeline, nullptr);
-            pipeline = VK_NULL_HANDLE;
-        }
-        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        pipelineLayout = VK_NULL_HANDLE;
-
-        createGraphicsPipeline();
-        //createColorResources();
-        //createDepthResources();
-        createCommandBuffers();
-
+        pipelines.rebuild(pipelineCreateInfo());
     }
 
     void createInstance()
@@ -1978,200 +1735,42 @@ private:
         return imageView;
     }
 
+    [[nodiscard]] danvulkan::vk::PipelineContextCreateInfo pipelineCreateInfo()
+    {
+        danvulkan::vk::PipelineContextCreateInfo createInfo;
+        createInfo.descriptorLayout = descriptors.layout();
+        createInfo.colorFormat = swapchain.format();
+        createInfo.depthFormat = findDepthFormat();
+        createInfo.samples = msaaSamples;
+        createInfo.vertexShader = std::filesystem::path(COMPILED_SHADER_PATH) / "vert.spv";
+        createInfo.fragmentShader = std::filesystem::path(COMPILED_SHADER_PATH) / "frag.spv";
+        createInfo.enableDebugNames = enableValidationLayers;
+        return createInfo;
+    }
+
     void createGraphicsPipeline()
     {
-        auto [vertCreateInfo, vertShader] = loadShader(COMPILED_SHADER_PATH + "vert.spv", VK_SHADER_STAGE_VERTEX_BIT);
-        auto  [fragCreateInfo, fragShader] = loadShader(COMPILED_SHADER_PATH + "frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT);
-        VkPipelineShaderStageCreateInfo shaderStages[] = { vertCreateInfo, fragCreateInfo };
-
-        VkPipelineVertexInputStateCreateInfo vertexInputInfo = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-        vertexInputInfo.vertexBindingDescriptionCount = 0; // 1
-        vertexInputInfo.pVertexBindingDescriptions = nullptr;// &bindingDescription;
-        vertexInputInfo.vertexAttributeDescriptionCount = 0;//   static_cast<uint32_t>(attributeDescriptions.size());
-        vertexInputInfo.pVertexAttributeDescriptions = nullptr; // attributeDescriptions.data();
-
-        VkPipelineInputAssemblyStateCreateInfo inputAssembly = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-        inputAssembly.topology =  VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-        VkPipelineViewportStateCreateInfo viewportState = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
-        viewportState.viewportCount = 1;
-        viewportState.pViewports = nullptr;
-        viewportState.scissorCount = 1;
-        viewportState.pScissors = nullptr;
-
-        constexpr std::array dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-        VkPipelineDynamicStateCreateInfo dynamicState{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-        dynamicState.pDynamicStates = dynamicStates.data();
-
-        VkPipelineRasterizationStateCreateInfo rasterizer = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
-        rasterizer.depthClampEnable = VK_FALSE;
-        rasterizer.rasterizerDiscardEnable = VK_FALSE;
-        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        rasterizer.depthBiasEnable = VK_FALSE;
-        rasterizer.depthBiasConstantFactor = 0.0f;
-        rasterizer.depthBiasClamp = 0.0f;
-        rasterizer.depthBiasSlopeFactor = 0.0f;
-
-        VkPipelineMultisampleStateCreateInfo multisampling = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
-        multisampling.sampleShadingEnable = VK_TRUE;
-        multisampling.rasterizationSamples = msaaSamples;
-        multisampling.minSampleShading = 0.2f;
-        multisampling.pSampleMask = nullptr;
-        multisampling.alphaToCoverageEnable = VK_FALSE;
-        multisampling.alphaToOneEnable = VK_FALSE;
-
-        VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
-        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
-            VK_COLOR_COMPONENT_A_BIT;
-        colorBlendAttachment.blendEnable = VK_FALSE;
-        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-
-        VkPipelineColorBlendStateCreateInfo colorBlending = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-        colorBlending.logicOpEnable = VK_FALSE;
-        colorBlending.logicOp = VK_LOGIC_OP_COPY;
-        colorBlending.attachmentCount = 1;
-        colorBlending.pAttachments = &colorBlendAttachment;
-        colorBlending.blendConstants[0] = 0.0f;
-        colorBlending.blendConstants[1] = 0.0f;
-        colorBlending.blendConstants[2] = 0.0f;
-        colorBlending.blendConstants[3] = 0.0f;
-
-        VkPipelineDepthStencilStateCreateInfo depthStencil{};
-        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depthStencil.depthTestEnable = VK_TRUE;
-        depthStencil.depthWriteEnable = VK_TRUE;
-        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-        depthStencil.depthBoundsTestEnable = VK_FALSE;
-        depthStencil.minDepthBounds = 0.0f;
-        depthStencil.maxDepthBounds = 1.0f;
-        depthStencil.stencilTestEnable = VK_FALSE;
-        // Dynamic State goes hereeeeeee
-
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-        pipelineLayoutInfo.setLayoutCount = 1;
-        const VkDescriptorSetLayout descriptorLayout = descriptors.layout();
-        pipelineLayoutInfo.pSetLayouts = &descriptorLayout;
-        pipelineLayoutInfo.pushConstantRangeCount = 0;
-        pipelineLayoutInfo.pPushConstantRanges = nullptr;
-
-        checkVk(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout),
-                "vkCreatePipelineLayout");
-        setDebugName(VK_OBJECT_TYPE_PIPELINE_LAYOUT, pipelineLayout, "main pipeline layout");
-
-        const VkFormat colorFormat = swapchain.format();
-        const VkFormat depthFormat = findDepthFormat();
-        VkPipelineRenderingCreateInfo renderingInfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
-        renderingInfo.colorAttachmentCount = 1;
-        renderingInfo.pColorAttachmentFormats = &colorFormat;
-        renderingInfo.depthAttachmentFormat = depthFormat;
-        if (hasStencilComponent(depthFormat))
+        const danvulkan::vk::PipelineContextCreateInfo createInfo = pipelineCreateInfo();
+        if (!pipelines)
         {
-            renderingInfo.stencilAttachmentFormat = depthFormat;
+            pipelines.initialize(device, createInfo);
         }
-
-        VkGraphicsPipelineCreateInfo pipelineInfo = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-        pipelineInfo.pNext = &renderingInfo;
-        pipelineInfo.stageCount = 2;
-        pipelineInfo.pStages = shaderStages;
-        pipelineInfo.pVertexInputState = &vertexInputInfo;
-        pipelineInfo.pInputAssemblyState = &inputAssembly;
-        pipelineInfo.pViewportState = &viewportState;
-        pipelineInfo.pRasterizationState = &rasterizer;
-        pipelineInfo.pMultisampleState = &multisampling;
-        pipelineInfo.pDepthStencilState = nullptr; // optional
-        pipelineInfo.pColorBlendState = &colorBlending;
-        pipelineInfo.pDynamicState = &dynamicState;
-        pipelineInfo.layout = pipelineLayout;
-        pipelineInfo.renderPass = VK_NULL_HANDLE;
-        pipelineInfo.subpass = 0;
-        pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // optional
-        pipelineInfo.basePipelineIndex = -1; // optional
-        pipelineInfo.pDepthStencilState = &depthStencil;
-
-        for (std::size_t index = 0; index < graphicsPipelines.size(); ++index)
+        else if (!pipelines.compatible(createInfo.descriptorLayout, createInfo.colorFormat,
+                     createInfo.depthFormat, createInfo.samples))
         {
-            const bool doubleSided = (index % 2U) != 0;
-            const bool blended = index >= static_cast<std::size_t>(PipelineVariant::blend);
-
-            rasterizer.cullMode = doubleSided ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
-            colorBlendAttachment.blendEnable = blended ? VK_TRUE : VK_FALSE;
-            colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            depthStencil.depthWriteEnable = blended ? VK_FALSE : VK_TRUE;
-
-            checkVk(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
-                        &graphicsPipelines[index]),
-                    "vkCreateGraphicsPipelines(material variant)");
-            setDebugName(VK_OBJECT_TYPE_PIPELINE, graphicsPipelines[index],
-                "material pipeline variant " + std::to_string(index));
-        }
-
-        vkDestroyShaderModule(device, fragShader, nullptr);
-        vkDestroyShaderModule(device, vertShader, nullptr);
-    }
-
-    VkShaderModule createShaderModule(const std::vector<char>& code)
-    {
-        // We don't delete shaderModule after creating pipeline, this could be bad?
-        VkShaderModuleCreateInfo createInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-        createInfo.codeSize = code.size();
-        createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
-
-        VkShaderModule shaderModule = VK_NULL_HANDLE;
-        checkVk(vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule), "vkCreateShaderModule");
-
-        return shaderModule;
-    }
-
-    std::tuple<VkPipelineShaderStageCreateInfo, VkShaderModule> loadShader(const std::string& filename, VkShaderStageFlagBits stage)
-    {
-        auto code = readFile(filename);
-        VkShaderModule shaderModule = createShaderModule(code);
-        setDebugName(VK_OBJECT_TYPE_SHADER_MODULE, shaderModule, filename);
-
-        VkPipelineShaderStageCreateInfo shaderStageCreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-        shaderStageCreateInfo.stage = stage;
-        shaderStageCreateInfo.module = shaderModule;
-        shaderStageCreateInfo.pName = "main";
-
-        return { shaderStageCreateInfo, shaderModule };
-    }
-
-    void createCommandPool()
-    {
-        VkCommandPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-        poolInfo.queueFamilyIndex = device.queueFamilies().graphicsFamily.value();
-        poolInfo.flags = 0; // optional
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-        {
-            checkVk(vkCreateCommandPool(device, &poolInfo, nullptr, &frames[i].commandPool),
-                    "vkCreateCommandPool");
-            setDebugName(VK_OBJECT_TYPE_COMMAND_POOL, frames[i].commandPool,
-                "frame command pool " + std::to_string(i));
+            pipelines.rebuild(createInfo);
         }
     }
 
-    void createQueryPool()
+    void createFrameContexts()
     {
-        VkQueryPoolCreateInfo createInfo = {};
-        createInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        createInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        createInfo.queryCount = 2;
-
-        checkVk(vkCreateQueryPool(device, &createInfo, nullptr, &queryPoolTimestamp), "vkCreateQueryPool");
-        setDebugName(VK_OBJECT_TYPE_QUERY_POOL, queryPoolTimestamp, "frame timestamp queries");
+        const std::uint32_t graphicsQueueFamily =
+            device.queueFamilies().graphicsFamily.value();
+        for (std::size_t index = 0; index < frames.size(); ++index)
+        {
+            frames[index].initialize(device, graphicsQueueFamily,
+                static_cast<std::uint32_t>(index), enableValidationLayers);
+        }
     }
     
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features)
@@ -2202,29 +1801,18 @@ private:
         );
     }
 
-    bool hasStencilComponent(VkFormat format)
+    [[nodiscard]] danvulkan::vk::AttachmentContextCreateInfo attachmentCreateInfo()
     {
-        return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
-    }
-
-    void createColorResources()
-    {
-        if (msaaSamples == VK_SAMPLE_COUNT_1_BIT)
-        {
-            colorImages.clear();
-            return;
-        }
-
-        colorImages.resize(swapchain.imageCount());
-        for (size_t i = 0; i < colorImages.size(); ++i)
-        {
-            colorImages[i] = createImage(swapchain.extent().width, swapchain.extent().height,
-                msaaSamples, swapchain.format(), VK_IMAGE_TILING_OPTIMAL,
-                VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "MSAA color image " + std::to_string(i));
-            colorImages[i].setView(createImageView(colorImages[i], swapchain.format(),
-                VK_IMAGE_ASPECT_COLOR_BIT, "MSAA color image view " + std::to_string(i)));
-        }
+        danvulkan::vk::AttachmentContextCreateInfo createInfo;
+        createInfo.extent = swapchain.extent();
+        createInfo.attachmentCount = attachmentTargetCount_;
+        createInfo.colorFormat = swapchain.format();
+        createInfo.depthFormat = findDepthFormat();
+        createInfo.samples = msaaSamples;
+        createInfo.preferLazilyAllocatedMemory =
+            config_.memory.preferLazilyAllocatedAttachments;
+        createInfo.enableDebugNames = enableValidationLayers;
+        return createInfo;
     }
 
     void createUploadContext()
@@ -2233,24 +1821,14 @@ private:
             device.queueFamilies().graphicsFamily.value(), enableValidationLayers);
     }
 
-    void createDepthResources()
+    void createSwapchainAttachments()
     {
-        const VkFormat depthFormat = findDepthFormat();
-        depthImages.resize(swapchain.imageCount());
-        for (size_t i = 0; i < depthImages.size(); ++i)
-        {
-            depthImages[i] = createImage(swapchain.extent().width, swapchain.extent().height,
-                msaaSamples,
-                depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "depth image " + std::to_string(i));
-            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-            if (hasStencilComponent(depthFormat))
-            {
-                aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
-            }
-            depthImages[i].setView(createImageView(depthImages[i], depthFormat, aspect,
-                "depth image view " + std::to_string(i)));
-        }
+        attachments.initialize(device, allocator, attachmentCreateInfo());
+    }
+
+    void recreateSwapchainAttachments()
+    {
+        attachments.recreate(attachmentCreateInfo());
     }
 
     [[nodiscard]] Texture createTextureImage(const danvulkan::assets::TextureAsset& source)
@@ -2331,11 +1909,11 @@ private:
 
     void createTextureImageViews()
     {
-        for (std::uint32_t index = 0; index < textures.size(); ++index)
+        for (std::uint32_t index = 0; index < scene_.textures.size(); ++index)
         {
-            if (textures[index])
+            if (scene_.textures[index])
             {
-                createTextureImageView(*textures[index], index);
+                createTextureImageView(*scene_.textures[index], index);
             }
         }
     }
@@ -2369,11 +1947,11 @@ private:
 
     void createTextureSamplers()
     {
-        for (std::size_t index = 0; index < textures.size(); ++index)
+        for (std::size_t index = 0; index < scene_.textures.size(); ++index)
         {
-            if (textures[index])
+            if (scene_.textures[index])
             {
-                createTextureSampler(*textures[index], static_cast<std::uint32_t>(index));
+                createTextureSampler(*scene_.textures[index], static_cast<std::uint32_t>(index));
             }
         }
     }
@@ -2407,23 +1985,6 @@ private:
             "vkCreateSampler(material texture)");
         setDebugName(VK_OBJECT_TYPE_SAMPLER, texture.sampler,
             "material texture sampler " + std::to_string(textureIndex));
-    }
-
-    void createCommandBuffers()
-    {
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-        {
-            VkCommandBufferAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-            allocInfo.commandPool = frames[i].commandPool;
-            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            allocInfo.commandBufferCount = 1; // TODO this is just a guess
-
-            checkVk(vkAllocateCommandBuffers(device, &allocInfo, &frames[i].commandBuffer),
-                    "vkAllocateCommandBuffers(frame)");
-            setDebugName(VK_OBJECT_TYPE_COMMAND_BUFFER, frames[i].commandBuffer,
-                "frame command buffer " + std::to_string(i));
-        }
-
     }
 
     static void transitionImage(
@@ -2461,17 +2022,8 @@ private:
 
     void updateCommandBuffer(uint32_t currentFrameIndex, uint32_t imageIndex)
     {
-        VkCommandBuffer commandBuffer = frames[currentFrameIndex].commandBuffer;
-        checkVk(vkResetCommandPool(device, frames[currentFrameIndex].commandPool, 0),
-                "vkResetCommandPool");
-
-        VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-        beginInfo.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-        checkVk(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer(frame)");
-        
-        vkCmdResetQueryPool(commandBuffer, queryPoolTimestamp, 0, 2);
-        vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, queryPoolTimestamp, 0);
+        danvulkan::vk::FrameContext& frame = frames[currentFrameIndex];
+        VkCommandBuffer commandBuffer = frame.beginCommands();
 
         transitionImage(commandBuffer, swapchain.images()[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2480,19 +2032,20 @@ private:
 
         if (msaaSamples != VK_SAMPLE_COUNT_1_BIT)
         {
-            transitionImage(commandBuffer, colorImages[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT,
+            transitionImage(commandBuffer, attachments.color(currentFrameIndex),
+                VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         }
 
-        const VkFormat depthFormat = findDepthFormat();
+        const VkFormat depthFormat = attachments.depthFormat();
         VkImageAspectFlags depthAspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-        if (hasStencilComponent(depthFormat))
+        if (danvulkan::vk::depthFormatHasStencil(depthFormat))
         {
             depthAspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
         }
-        transitionImage(commandBuffer, depthImages[imageIndex], depthAspect,
+        transitionImage(commandBuffer, attachments.depth(currentFrameIndex), depthAspect,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
@@ -2501,7 +2054,7 @@ private:
         VkRenderingAttachmentInfo colorAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
         colorAttachment.imageView = msaaSamples == VK_SAMPLE_COUNT_1_BIT
             ? swapchain.imageViews()[imageIndex]
-            : colorImages[imageIndex].view();
+            : attachments.colorView(currentFrameIndex);
         colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         colorAttachment.storeOp = msaaSamples == VK_SAMPLE_COUNT_1_BIT
@@ -2516,7 +2069,7 @@ private:
         }
 
         VkRenderingAttachmentInfo depthAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-        depthAttachment.imageView = depthImages[imageIndex].view();
+        depthAttachment.imageView = attachments.depthView(currentFrameIndex);
         depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -2528,7 +2081,7 @@ private:
         renderingInfo.colorAttachmentCount = 1;
         renderingInfo.pColorAttachments = &colorAttachment;
         renderingInfo.pDepthAttachment = &depthAttachment;
-        if (hasStencilComponent(depthFormat))
+        if (danvulkan::vk::depthFormatHasStencil(depthFormat))
         {
             renderingInfo.pStencilAttachment = &depthAttachment;
         }
@@ -2544,24 +2097,24 @@ private:
 
         VkRect2D scissor{ { 0, 0 }, swapchain.extent() };
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdBindIndexBuffer(commandBuffer, scene_.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
         const VkDescriptorSet descriptorSet = descriptors.set(imageIndex);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+            pipelines.layout(), 0, 1, &descriptorSet, 0, nullptr);
 
         for (std::size_t variant = 0; variant < PipelineVariantCount; ++variant)
         {
-            const DrawBatch& batch = drawBatches[variant];
+            const DrawBatch& batch = scene_.drawBatches[variant];
             if (batch.commandCount == 0)
             {
                 continue;
             }
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                graphicsPipelines[variant]);
+                pipelines.pipeline(variant));
             const VkDeviceSize offset = static_cast<VkDeviceSize>(batch.firstCommand) *
                 sizeof(VkDrawIndexedIndirectCommand);
-            vkCmdDrawIndexedIndirect(commandBuffer, indirectCommandsBuffer[imageIndex], offset,
+            vkCmdDrawIndexedIndirect(commandBuffer, scene_.indirectCommandsBuffer[imageIndex], offset,
                 batch.commandCount, sizeof(VkDrawIndexedIndirectCommand));
         }
         vkCmdEndRendering(commandBuffer);
@@ -2570,57 +2123,23 @@ private:
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE);
-        vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, queryPoolTimestamp, 1);
-
-        checkVk(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer(frame)");
-    }
-
-    void createSyncObjects()
-    {
-        VkSemaphoreCreateInfo semaphoreInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-        VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-
-        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-        {
-            checkVk(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &frames[i].imageAvailable),
-                    "vkCreateSemaphore(image available)");
-            checkVk(vkCreateFence(device, &fenceInfo, nullptr, &frames[i].inFlight),
-                    "vkCreateFence(frame in flight)");
-            setDebugName(VK_OBJECT_TYPE_SEMAPHORE, frames[i].imageAvailable,
-                "image available semaphore " + std::to_string(i));
-            setDebugName(VK_OBJECT_TYPE_FENCE, frames[i].inFlight,
-                "in-flight fence " + std::to_string(i));
-        }
-        createSwapchainSyncObjects();
-    }
-
-    void createSwapchainSyncObjects()
-    {
-        renderFinishedSemaphores.resize(swapchain.imageCount());
-        imagesInFlight.assign(swapchain.imageCount(), VK_NULL_HANDLE);
-        VkSemaphoreCreateInfo semaphoreInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-        for (size_t i = 0; i < renderFinishedSemaphores.size(); ++i)
-        {
-            checkVk(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]),
-                    "vkCreateSemaphore(render finished)");
-            setDebugName(VK_OBJECT_TYPE_SEMAPHORE, renderFinishedSemaphores[i],
-                "render finished semaphore " + std::to_string(i));
-        }
+        frame.endCommands();
     }
 
     void drawFrame(const SceneSubmission& submission)
     {
-        FrameResources& frame = frames[currentFrame];
-        checkVk(vkWaitForFences(device, 1, &frame.inFlight, VK_TRUE, UINT64_MAX),
-                "vkWaitForFences(frame)");
+        danvulkan::vk::FrameContext& frame = frames[currentFrame];
+        if (const std::optional<double> gpuMilliseconds = frame.waitForReuse(timestampPeriod))
+        {
+            frameGpuAvg = frameGpuAvg * 0.95 + *gpuMilliseconds * 0.05;
+        }
         const bool framebufferResized = platform_->consumeFramebufferResize();
 
         uint32_t imageIndex;
 
 
-        VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frame.imageAvailable,
+        VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+            frame.imageAvailable(),
             VK_NULL_HANDLE, &imageIndex);
         // swapchain is incompoatible with surface and can't be used for rendering, usually after window resize
         if (result == VK_ERROR_OUT_OF_DATE_KHR)
@@ -2633,28 +2152,28 @@ private:
             throw std::runtime_error("failed to acquire swap chain image!");
         }
 
-        if (imagesInFlight[imageIndex] != VK_NULL_HANDLE)
-        {
-            checkVk(vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX),
-                    "vkWaitForFences(swapchain image)");
-        }
-        prepareGeometryForImage(imageIndex);
-        prepareGeometryRangesForImage(imageIndex);
-        prepareTexturesForImage(imageIndex);
-        imagesInFlight[imageIndex] = frame.inFlight;
+        presentation.waitForImage(imageIndex);
+        scene_.prepareGeometryForImage(imageIndex, descriptors);
+        scene_.prepareGeometryRangesForImage(imageIndex);
+        scene_.prepareTexturesForImage(imageIndex, descriptors, device);
+        presentation.markImageInFlight(imageIndex, frame.inFlight());
 
         updateUniformBuffer(imageIndex, submission);
+        const auto commandRecordingBegin = std::chrono::steady_clock::now();
         updateCommandBuffer(static_cast<uint32_t>(currentFrame), imageIndex);
+        commandRecordingCpuAvg_ = rollingAverage(commandRecordingCpuAvg_,
+            millisecondsSince(commandRecordingBegin));
 
         VkSemaphoreSubmitInfo waitInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO };
-        waitInfo.semaphore = frame.imageAvailable;
+        waitInfo.semaphore = frame.imageAvailable();
         waitInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 
         VkCommandBufferSubmitInfo commandBufferInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO };
-        commandBufferInfo.commandBuffer = frame.commandBuffer;
+        commandBufferInfo.commandBuffer = frame.commandBuffer();
 
         VkSemaphoreSubmitInfo signalInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO };
-        signalInfo.semaphore = renderFinishedSemaphores[imageIndex];
+        const VkSemaphore renderFinished = presentation.renderFinished(imageIndex);
+        signalInfo.semaphore = renderFinished;
         signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
 
         VkSubmitInfo2 submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
@@ -2665,13 +2184,14 @@ private:
         submitInfo.signalSemaphoreInfoCount = 1;
         submitInfo.pSignalSemaphoreInfos = &signalInfo;
        
-        checkVk(vkResetFences(device, 1, &frame.inFlight), "vkResetFences");
-        checkVk(vkQueueSubmit2(device.graphicsQueue(), 1, &submitInfo, frame.inFlight),
+        frame.resetFenceForSubmit();
+        checkVk(vkQueueSubmit2(device.graphicsQueue(), 1, &submitInfo, frame.inFlight()),
                 "vkQueueSubmit2(frame)");
+        frame.markSubmitted();
 
         VkPresentInfoKHR presentInfo = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
         presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = &renderFinishedSemaphores[imageIndex];
+        presentInfo.pWaitSemaphores = &renderFinished;
 
         VkSwapchainKHR swapChains[] = { swapchain };
         presentInfo.swapchainCount = 1;
@@ -2690,16 +2210,6 @@ private:
             throw std::runtime_error("failed to present swap chain image");
         }
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-        // GPU timing
-        uint64_t timestampResults[2] = {};
-        checkVk(vkGetQueryPoolResults(device, queryPoolTimestamp, 0, 2, sizeof(timestampResults),
-            timestampResults, sizeof(timestampResults[0]), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
-            "vkGetQueryPoolResults");
-        double frameGpuBegin = double(timestampResults[0]) * timestampPeriod * 1e-6;
-        double frameGpuEnd = double(timestampResults[1]) * timestampPeriod * 1e-6;
-
-
-        frameGpuAvg = frameGpuAvg * 0.95 + (frameGpuEnd - frameGpuBegin) * 0.05;
     }
     
     void update()
@@ -2748,87 +2258,37 @@ private:
 
     void updateAnimation(float deltaSeconds)
     {
-        if (!animationPlayer_)
+        if (!scene_.animationPlayer_)
         {
             return;
         }
-        animationPlayer_->update(deltaSeconds);
-        synchronizeAnimationPose();
-    }
-
-    void synchronizeAnimationPose()
-    {
-        if (!animationPlayer_)
-        {
-            return;
-        }
-        for (const AnimatedDrawState& state : animatedDraws_)
-        {
-            if (state.transformIndex >= transformData.size() ||
-                state.meshDataIndex >= meshData.size() || state.meshDataIndex >= aabbs.size())
-            {
-                throw std::runtime_error("animated renderer state is inconsistent");
-            }
-            const glm::mat4& world = animationPlayer_->worldTransform(state.node);
-            transformData[state.transformIndex].model = world;
-            aabbs[state.meshDataIndex] = transformedBounds(
-                meshData[state.meshDataIndex].localBounds, world);
-        }
-        jointMatrices_.clear();
-        for (const SkinnedDrawState& state : skinnedDraws_)
-        {
-            if (jointMatrices_.size() != state.jointOffset)
-            {
-                throw std::runtime_error("animated renderer state is inconsistent");
-            }
-            animationPlayer_->appendSkinMatrices(state.skin, state.node, jointMatrices_);
-        }
-        if (jointMatrices_.size() > JointMatrixCount)
-        {
-            throw std::runtime_error("animated scene exceeds the renderer joint matrix capacity");
-        }
-    }
-
-    void destroySwapchainSyncObjects() noexcept
-    {
-        for (VkSemaphore semaphore : renderFinishedSemaphores)
-        {
-            vkDestroySemaphore(device, semaphore, nullptr);
-        }
-        renderFinishedSemaphores.clear();
-        imagesInFlight.clear();
+        const auto evaluationBegin = std::chrono::steady_clock::now();
+        scene_.animationPlayer_->update(deltaSeconds);
+        animationEvaluationCpuAvg_ = rollingAverage(animationEvaluationCpuAvg_,
+            millisecondsSince(evaluationBegin));
+        const auto synchronizationBegin = std::chrono::steady_clock::now();
+        scene_.synchronizeAnimationPose();
+        animationSynchronizationCpuAvg_ = rollingAverage(animationSynchronizationCpuAvg_,
+            millisecondsSince(synchronizationBegin));
     }
 
     void rebuildSwapchainIndexedResources()
     {
-        destroySwapchainSyncObjects();
         descriptors.resetSets();
         uniformBuffers.clear();
-        matBuffers.clear();
-        transformBuffers.clear();
-        drawBuffers.clear();
-        jointBuffers.clear();
-        indirectCommandsBuffer.clear();
+        scene_.matBuffers.clear();
+        scene_.transformBuffers.clear();
+        scene_.drawBuffers.clear();
+        scene_.jointBuffers.clear();
+        scene_.indirectCommandsBuffer.clear();
 
-        // Recreation waits for device idle, so every deferred generation is complete.
-        retiredGeometry_.clear();
-        for (const RetiredGeometryRanges& retired : retiredGeometryRanges_)
-        {
-            releaseGeometryRange(freeVertexRanges_, retired.vertices);
-            releaseGeometryRange(freeIndexRanges_, retired.indices);
-        }
-        retiredGeometryRanges_.clear();
-        for (RetiredTexture& retired : retiredTextures_)
-        {
-            vkDestroySampler(device, retired.texture.sampler, nullptr);
-            retired.texture.sampler = VK_NULL_HANDLE;
-        }
-        retiredTextures_.clear();
+        // Recreation waits for every frame plus the presentation queue, so all per-image
+        // generations are complete without idling unrelated device queues.
+        scene_.releaseSwapchainRetirements(device);
 
         createUniformBuffers();
         createBindlessBuffers();
         createDescriptorSets();
-        createSwapchainSyncObjects();
     }
 #pragma endregion
     void updateUniformBuffer(uint32_t currentImage, const SceneSubmission& submission)
@@ -2853,124 +2313,36 @@ private:
         ubo.cameraPositionTime = glm::vec4(submission.cameraPosition, 1.0f);
         ubo.lightPosition = glm::vec4(submission.lightPosition, 1.0f);
         
-        cullAABB(submission.view, ubo.projection, submission.cameraPosition);
+        const auto cullingBegin = std::chrono::steady_clock::now();
+        const danvulkan::vk::SceneDrawCounts drawCounts = scene_.prepareDraws(
+            submission.view, ubo.projection, submission.cameraPosition);
+        lastActiveDrawCount_ = drawCounts.active;
+        lastVisibleDrawCount_ = drawCounts.visible;
+        lastAnimatedDrawCount_ = drawCounts.animated;
+        lastJointMatrixCount_ = drawCounts.joints;
+        cullingCpuAvg_ = rollingAverage(cullingCpuAvg_, millisecondsSince(cullingBegin));
 
         // Update to GPU
         // NOTE: this is a hot area for code performance
+        const auto bufferWriteBegin = std::chrono::steady_clock::now();
         // UBO
         writeBuffer(uniformBuffers[currentImage], &ubo, sizeof(ubo));
         // Transform
-        writeBuffer(transformBuffers[currentImage], transformData.data(), sizeof(TransformData) * transformData.size());
+        writeBuffer(scene_.transformBuffers[currentImage], scene_.transformData.data(), sizeof(TransformData) * scene_.transformData.size());
         // Material Data
-        writeBuffer(matBuffers[currentImage], matData.data(), sizeof(MaterialData) * matData.size());
+        writeBuffer(scene_.matBuffers[currentImage], scene_.matData.data(), sizeof(MaterialData) * scene_.matData.size());
         // Draw Data
-        writeBuffer(drawBuffers[currentImage], drawData.data(), sizeof(DrawData) * drawData.size());
-        if (!jointMatrices_.empty())
+        writeBuffer(scene_.drawBuffers[currentImage], scene_.drawData.data(), sizeof(DrawData) * scene_.drawData.size());
+        if (!scene_.jointMatrices_.empty())
         {
-            writeBuffer(jointBuffers[currentImage], jointMatrices_.data(),
-                sizeof(glm::mat4) * jointMatrices_.size());
+            writeBuffer(scene_.jointBuffers[currentImage], scene_.jointMatrices_.data(),
+                sizeof(glm::mat4) * scene_.jointMatrices_.size());
         }
         // indirect
-        writeBuffer(indirectCommandsBuffer[currentImage], indirectCommands.data(),
-            sizeof(VkDrawIndexedIndirectCommand) * indirectCommands.size());
-    }
-
-    void cullAABB(const glm::mat4& viewMatrix, const glm::mat4& projectionMatrix,
-        const glm::vec3& cameraPosition)
-    {
-        const glm::mat4 viewProjection = glm::transpose(projectionMatrix * viewMatrix);
-        std::array<glm::vec4, 6> planes{
-            viewProjection[3] + viewProjection[0],
-            viewProjection[3] - viewProjection[0],
-            viewProjection[3] - viewProjection[1],
-            viewProjection[3] + viewProjection[1],
-            viewProjection[3] + viewProjection[2],
-            viewProjection[3] - viewProjection[2]
-        };
-        for (glm::vec4& plane : planes)
-        {
-            const float length = glm::length(glm::vec3(plane));
-            if (length > 0.0f)
-            {
-                plane /= length;
-            }
-        }
-
-        drawData.clear();
-        indirectCommands.clear();
-        drawBatches.fill({});
-        std::array<std::vector<std::size_t>, PipelineVariantCount> visibleMeshes;
-        for (size_t i = 0; i < aabbs.size(); i++)
-        {
-            bool cull = false;
-            for (int planeID = 0; planeID < 6; ++planeID)
-            {
-                const glm::vec3 planeNormal = planes[planeID];
-                const float planeConstant = planes[planeID].w;
-                // check each axis to get the AABB vertex further away from the direction plane is facing (plane normal)
-                glm::vec3 axisVert;
-
-                // add position to the aabb here, we're all 0 here tho.
-                if (planeNormal.x < 0.0f)
-                    axisVert.x = aabbs[i].minVertex.x;
-                else
-                    axisVert.x = aabbs[i].maxVertex.x;
-
-                if (planeNormal.y < 0.0)
-                    axisVert.y = aabbs[i].minVertex.y;
-                else
-                    axisVert.y = aabbs[i].maxVertex.y;
-                
-                if (planeNormal.z < 0.0)
-                    axisVert.z = aabbs[i].minVertex.z;
-                else
-                    axisVert.z = aabbs[i].maxVertex.z;
-
-                if (glm::dot(planeNormal, axisVert) + planeConstant < 0.0f)
-                {
-                    cull = true;
-                    break;
-                }
-            }
-            if (!cull)
-            {
-                visibleMeshes[meshData[i].pipelineVariant].push_back(i);
-            }
-        }
-
-        const auto distanceSquared = [&](std::size_t meshIndex)
-        {
-            const glm::vec3 center = (aabbs[meshIndex].minVertex + aabbs[meshIndex].maxVertex) * 0.5f;
-            const glm::vec3 offset = center - cameraPosition;
-            return glm::dot(offset, offset);
-        };
-        for (std::size_t variant = static_cast<std::size_t>(PipelineVariant::blend);
-             variant < PipelineVariantCount; ++variant)
-        {
-            std::ranges::sort(visibleMeshes[variant], [&](std::size_t left, std::size_t right)
-            {
-                return distanceSquared(left) > distanceSquared(right);
-            });
-        }
-
-        for (std::size_t variant = 0; variant < PipelineVariantCount; ++variant)
-        {
-            DrawBatch& batch = drawBatches[variant];
-            batch.firstCommand = static_cast<std::uint32_t>(indirectCommands.size());
-            for (const std::size_t meshIndex : visibleMeshes[variant])
-            {
-                const MeshData& mesh = meshData[meshIndex];
-                VkDrawIndexedIndirectCommand command{};
-                command.indexCount = mesh.indexCount;
-                command.firstIndex = mesh.firstIndex;
-                command.firstInstance = static_cast<std::uint32_t>(drawData.size());
-                command.instanceCount = 1;
-                command.vertexOffset = static_cast<std::int32_t>(mesh.vertexOffset);
-                indirectCommands.push_back(command);
-                drawData.push_back(mesh.drawData);
-            }
-            batch.commandCount = static_cast<std::uint32_t>(indirectCommands.size()) - batch.firstCommand;
-        }
+        writeBuffer(scene_.indirectCommandsBuffer[currentImage], scene_.indirectCommands.data(),
+            sizeof(VkDrawIndexedIndirectCommand) * scene_.indirectCommands.size());
+        bufferWriteCpuAvg_ = rollingAverage(bufferWriteCpuAvg_,
+            millisecondsSince(bufferWriteBegin));
     }
 
     template <typename Handle>
@@ -3061,12 +2433,25 @@ private:
     }
 
     danvulkan::vk::Buffer createDeviceLocalBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-        const void* bufferData, std::string_view name)
+        const void* bufferData, VkDeviceSize uploadSize, std::string_view name)
     {
-        auto destination = createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+        if (bufferData == nullptr || uploadSize == 0 || uploadSize > size)
+        {
+            throw std::invalid_argument("device-local buffer requires a valid initial payload");
+        }
+        auto destination = createBuffer(size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, name);
-        uploadContext_.uploadBuffer(destination, 0, bufferData, size, usage, name);
+        uploadContext_.uploadBuffer(destination, 0, bufferData, uploadSize, usage, name);
         return destination;
+    }
+
+    danvulkan::vk::Buffer createEmptyDeviceLocalBuffer(
+        VkDeviceSize size, VkBufferUsageFlags usage, std::string_view name)
+    {
+        return createBuffer(size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, name);
     }
 
     void uploadDeviceLocalBufferRange(danvulkan::vk::Buffer& destination,
@@ -3081,41 +2466,27 @@ private:
         uploadContext_.uploadBuffer(destination, destinationOffset, bufferData, size, usage, name);
     }
 
-    void createVertexBuffer()
-    {
-        const VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
-        vertexBuffer = createDeviceLocalBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            vertices.data(), "scene vertex storage buffer");
-    }
-
-    void createIndexBuffer()
-    {
-        VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
-        indexBuffer = createDeviceLocalBuffer(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-            indices.data(), "scene index buffer");
-    }
-
     void ensureGeometryCapacity(std::uint32_t vertexCount, std::uint32_t indexCount)
     {
-        const bool growVertices = !hasGeometryRange(freeVertexRanges_, vertexCount);
-        const bool growIndices = !hasGeometryRange(freeIndexRanges_, indexCount);
+        const bool growVertices = !scene_.hasGeometryRange(scene_.freeVertexRanges_, vertexCount);
+        const bool growIndices = !scene_.hasGeometryRange(scene_.freeIndexRanges_, indexCount);
         if (!growVertices && !growIndices)
         {
             return;
         }
-        if (geometryVersion_ == std::numeric_limits<std::uint64_t>::max())
+        if (scene_.geometryVersion_ == std::numeric_limits<std::uint64_t>::max())
         {
             throw std::runtime_error("geometry buffer generation counter exhausted");
         }
 
         const std::uint32_t newVertexCapacity = growVertices
-            ? grownGeometryCapacity(vertexCapacity_, vertexCount,
+            ? scene_.grownGeometryCapacity(scene_.vertexCapacity_, vertexCount,
                 static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
-            : vertexCapacity_;
+            : scene_.vertexCapacity_;
         const std::uint32_t newIndexCapacity = growIndices
-            ? grownGeometryCapacity(indexCapacity_, indexCount,
+            ? scene_.grownGeometryCapacity(scene_.indexCapacity_, indexCount,
                 std::numeric_limits<std::uint32_t>::max())
-            : indexCapacity_;
+            : scene_.indexCapacity_;
 
         const VkPhysicalDeviceProperties& physicalDeviceProperties = device.properties();
         if (sizeof(Vertex) * static_cast<VkDeviceSize>(newVertexCapacity) >
@@ -3124,43 +2495,41 @@ private:
             throw std::runtime_error("grown vertex capacity exceeds maxStorageBufferRange");
         }
 
-        std::vector<Vertex> expandedVertices = vertices;
-        expandedVertices.resize(newVertexCapacity);
-        std::vector<std::uint32_t> expandedIndices = indices;
-        expandedIndices.resize(newIndexCapacity);
-
-        auto newVertexBuffer = createDeviceLocalBuffer(
+        auto newVertexBuffer = createEmptyDeviceLocalBuffer(
             sizeof(Vertex) * static_cast<VkDeviceSize>(newVertexCapacity),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, expandedVertices.data(),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             "grown scene vertex storage buffer");
-        auto newIndexBuffer = createDeviceLocalBuffer(
+        auto newIndexBuffer = createEmptyDeviceLocalBuffer(
             sizeof(std::uint32_t) * static_cast<VkDeviceSize>(newIndexCapacity),
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT, expandedIndices.data(),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             "grown scene index buffer");
+        uploadContext_.copyBuffer(scene_.vertexBuffer, newVertexBuffer, scene_.vertexBuffer.size(),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "preserve scene vertex storage");
+        uploadContext_.copyBuffer(scene_.indexBuffer, newIndexBuffer, scene_.indexBuffer.size(),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT, "preserve scene index storage");
 
-        retiredGeometry_.emplace_back();
-        RetiredGeometry& retired = retiredGeometry_.back();
-        retired.version = geometryVersion_;
-        retired.vertexBuffer = std::move(vertexBuffer);
-        retired.indexBuffer = std::move(indexBuffer);
-        vertexBuffer = std::move(newVertexBuffer);
-        indexBuffer = std::move(newIndexBuffer);
-        ++geometryVersion_;
+        scene_.retiredGeometry_.emplace_back();
+        RetiredGeometry& retired = scene_.retiredGeometry_.back();
+        retired.version = scene_.geometryVersion_;
+        retired.vertexBuffer = std::move(scene_.vertexBuffer);
+        retired.indexBuffer = std::move(scene_.indexBuffer);
+        scene_.vertexBuffer = std::move(newVertexBuffer);
+        scene_.indexBuffer = std::move(newIndexBuffer);
+        ++scene_.geometryVersion_;
 
-        vertices = std::move(expandedVertices);
-        indices = std::move(expandedIndices);
-        if (newVertexCapacity > vertexCapacity_)
+        if (newVertexCapacity > scene_.vertexCapacity_)
         {
-            releaseGeometryRange(freeVertexRanges_,
-                { vertexCapacity_, newVertexCapacity - vertexCapacity_ });
+            scene_.releaseGeometryRange(scene_.freeVertexRanges_,
+                { scene_.vertexCapacity_, newVertexCapacity - scene_.vertexCapacity_ });
         }
-        if (newIndexCapacity > indexCapacity_)
+        if (newIndexCapacity > scene_.indexCapacity_)
         {
-            releaseGeometryRange(freeIndexRanges_,
-                { indexCapacity_, newIndexCapacity - indexCapacity_ });
+            scene_.releaseGeometryRange(scene_.freeIndexRanges_,
+                { scene_.indexCapacity_, newIndexCapacity - scene_.indexCapacity_ });
         }
-        vertexCapacity_ = newVertexCapacity;
-        indexCapacity_ = newIndexCapacity;
+        scene_.vertexCapacity_ = newVertexCapacity;
+        scene_.indexCapacity_ = newIndexCapacity;
+        captureMemoryPeak();
     }
 
     void createUniformBuffers()
@@ -3178,18 +2547,18 @@ private:
 
     void createBindlessBuffers()
     {
-        matBuffers.resize(swapchain.imageCount());
+        scene_.matBuffers.resize(swapchain.imageCount());
 
-        transformBuffers.resize(swapchain.imageCount());
+        scene_.transformBuffers.resize(swapchain.imageCount());
 
-        drawBuffers.resize(swapchain.imageCount());
+        scene_.drawBuffers.resize(swapchain.imageCount());
 
-        jointBuffers.resize(swapchain.imageCount());
+        scene_.jointBuffers.resize(swapchain.imageCount());
 
 
-        indirectCommandsBuffer.resize(swapchain.imageCount());
+        scene_.indirectCommandsBuffer.resize(swapchain.imageCount());
 
-        VkDeviceSize matBufferSize = sizeof(MaterialData) * materialCapacity_;
+        VkDeviceSize matBufferSize = sizeof(MaterialData) * scene_.materialCapacity_;
         VkDeviceSize transformBufferSize = sizeof(TransformData) * TransformDataCount;
         VkDeviceSize drawBufferSize = sizeof(DrawData) * DrawDataCount;
         VkDeviceSize jointBufferSize = sizeof(glm::mat4) * JointMatrixCount;
@@ -3198,26 +2567,26 @@ private:
         for (size_t i = 0; i < swapchain.imageCount(); i++)
         {
             // Material Data
-            matBuffers[i] = createBuffer(matBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            scene_.matBuffers[i] = createBuffer(matBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true,
                 "material buffer " + std::to_string(i));
 
             // Transform
-            transformBuffers[i] = createBuffer(transformBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            scene_.transformBuffers[i] = createBuffer(transformBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true,
                 "transform buffer " + std::to_string(i));
 
             // DrawData
-            drawBuffers[i] = createBuffer(drawBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            scene_.drawBuffers[i] = createBuffer(drawBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true,
                 "draw buffer " + std::to_string(i));
 
-            jointBuffers[i] = createBuffer(jointBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            scene_.jointBuffers[i] = createBuffer(jointBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true,
                 "joint matrix buffer " + std::to_string(i));
 
             // Indirect Draw
-            indirectCommandsBuffer[i] = createBuffer(indirectBufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+            scene_.indirectCommandsBuffer[i] = createBuffer(indirectBufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true,
                 "indirect draw buffer " + std::to_string(i));
 
@@ -3227,8 +2596,8 @@ private:
 
     void updateIndirectBuffer()
     {
-       // VkDeviceSize bufferSize = sizeof(VkDrawIndexedIndirectCommand) * indirectCommands.size();
-        //createDeviceLocalBuffer(bufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, indirectCommandsBuffer[0], indirectCommandsBufferMemory[0], indirectCommands.data());
+       // VkDeviceSize bufferSize = sizeof(VkDrawIndexedIndirectCommand) * scene_.indirectCommands.size();
+        //createDeviceLocalBuffer(bufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, scene_.indirectCommandsBuffer[0], indirectCommandsBufferMemory[0], scene_.indirectCommands.data());
     }
 
     void createDescriptorSetLayout()
@@ -3237,7 +2606,7 @@ private:
         const std::optional<std::uint32_t> capacity =
             danvulkan::vk::selectTextureDescriptorCapacity({
                 config_.maxTextures,
-                liveTextureCount_,
+                scene_.liveTextureCount_,
                 properties.limits.maxPerStageDescriptorSamplers,
                 properties.limits.maxDescriptorSetSamplers
             });
@@ -3246,53 +2615,19 @@ private:
             throw std::runtime_error(
                 "configured bindless texture capacity is invalid for this scene or device");
         }
-        textureDescriptorCapacity_ = *capacity;
-        textures.reserve(textureDescriptorCapacity_);
-        textureGenerations_.reserve(textureDescriptorCapacity_);
-        freeTextureSlots_.reserve(textureDescriptorCapacity_);
-        descriptors.initialize(device, textureDescriptorCapacity_, enableValidationLayers);
-    }
-
-    [[nodiscard]] std::vector<VkDescriptorImageInfo> textureDescriptorInfos() const
-    {
-        if (liveTextureCount_ == 0 || textureDescriptorCapacity_ < textures.size())
-        {
-            throw std::runtime_error("bindless texture descriptor state is inconsistent");
-        }
-
-        const Texture* fallback = nullptr;
-        for (const std::optional<Texture>& texture : textures)
-        {
-            if (texture)
-            {
-                fallback = &*texture;
-                break;
-            }
-        }
-        if (fallback == nullptr)
-        {
-            throw std::runtime_error("bindless texture fallback is missing");
-        }
-
-        std::vector<VkDescriptorImageInfo> imageInfo(textureDescriptorCapacity_);
-        for (std::uint32_t textureIndex = 0; textureIndex < textureDescriptorCapacity_; ++textureIndex)
-        {
-            const Texture& texture = textureIndex < textures.size() && textures[textureIndex]
-                ? *textures[textureIndex]
-                : *fallback;
-            imageInfo[textureIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo[textureIndex].imageView = texture.image.view();
-            imageInfo[textureIndex].sampler = texture.sampler;
-        }
-        return imageInfo;
+        scene_.textureDescriptorCapacity_ = *capacity;
+        scene_.textures.reserve(scene_.textureDescriptorCapacity_);
+        scene_.textureGenerations_.reserve(scene_.textureDescriptorCapacity_);
+        scene_.freeTextureSlots_.reserve(scene_.textureDescriptorCapacity_);
+        descriptors.initialize(device, scene_.textureDescriptorCapacity_, enableValidationLayers);
     }
 
     void createDescriptorSets()
     {
         const std::size_t setCount = swapchain.imageCount();
-        if (uniformBuffers.size() != setCount || matBuffers.size() != setCount ||
-            drawBuffers.size() != setCount || transformBuffers.size() != setCount ||
-            jointBuffers.size() != setCount)
+        if (uniformBuffers.size() != setCount || scene_.matBuffers.size() != setCount ||
+            scene_.drawBuffers.size() != setCount || scene_.transformBuffers.size() != setCount ||
+            scene_.jointBuffers.size() != setCount)
         {
             throw std::runtime_error(
                 "swapchain descriptor buffer counts are inconsistent");
@@ -3302,108 +2637,17 @@ private:
         {
             bindings[index] = {
                 { uniformBuffers[index], 0, sizeof(UniformBufferObject) },
-                { matBuffers[index], 0, sizeof(MaterialData) * materialCapacity_ },
-                { drawBuffers[index], 0, sizeof(DrawData) * DrawDataCount },
-                { transformBuffers[index], 0,
+                { scene_.matBuffers[index], 0, sizeof(MaterialData) * scene_.materialCapacity_ },
+                { scene_.drawBuffers[index], 0, sizeof(DrawData) * DrawDataCount },
+                { scene_.transformBuffers[index], 0,
                     sizeof(TransformData) * TransformDataCount },
-                { vertexBuffer, 0, sizeof(Vertex) * vertices.size() },
-                { jointBuffers[index], 0, sizeof(glm::mat4) * JointMatrixCount }
+                { scene_.vertexBuffer, 0, scene_.vertexBuffer.size() },
+                { scene_.jointBuffers[index], 0, sizeof(glm::mat4) * JointMatrixCount }
             };
         }
-        const std::vector<VkDescriptorImageInfo> textureInfos = textureDescriptorInfos();
+        const std::vector<VkDescriptorImageInfo> textureInfos = scene_.textureDescriptorInfos();
         descriptors.allocateSets(bindings, textureInfos);
-        imageGeometryVersions_.assign(descriptors.setCount(), geometryVersion_);
-        imageGeometryRangeVersions_.assign(descriptors.setCount(), geometryRangeVersion_);
-        imageTextureVersions_.assign(descriptors.setCount(), textureVersion_);
-    }
-
-    void prepareGeometryForImage(std::uint32_t imageIndex)
-    {
-        if (imageIndex >= descriptors.setCount() ||
-            imageIndex >= imageGeometryVersions_.size())
-        {
-            throw std::runtime_error("swapchain geometry descriptor state is inconsistent");
-        }
-        if (imageGeometryVersions_[imageIndex] == geometryVersion_)
-        {
-            return;
-        }
-
-        descriptors.updateVertex(imageIndex,
-            { vertexBuffer, 0, sizeof(Vertex) * vertices.size() });
-
-        imageGeometryVersions_[imageIndex] = geometryVersion_;
-        std::erase_if(retiredGeometry_, [&](const RetiredGeometry& retired)
-        {
-            return std::ranges::all_of(imageGeometryVersions_, [&](std::uint64_t imageVersion)
-            {
-                return imageVersion > retired.version;
-            });
-        });
-    }
-
-    void prepareGeometryRangesForImage(std::uint32_t imageIndex)
-    {
-        if (imageIndex >= imageGeometryRangeVersions_.size())
-        {
-            throw std::runtime_error("swapchain geometry range state is inconsistent");
-        }
-        if (imageGeometryRangeVersions_[imageIndex] == geometryRangeVersion_)
-        {
-            return;
-        }
-
-        imageGeometryRangeVersions_[imageIndex] = geometryRangeVersion_;
-        for (auto retired = retiredGeometryRanges_.begin();
-             retired != retiredGeometryRanges_.end();)
-        {
-            const bool noLongerReferenced = std::ranges::all_of(imageGeometryRangeVersions_,
-                [&](std::uint64_t imageVersion)
-                {
-                    return imageVersion > retired->version;
-                });
-            if (!noLongerReferenced)
-            {
-                ++retired;
-                continue;
-            }
-            releaseGeometryRange(freeVertexRanges_, retired->vertices);
-            releaseGeometryRange(freeIndexRanges_, retired->indices);
-            retired = retiredGeometryRanges_.erase(retired);
-        }
-    }
-
-    void prepareTexturesForImage(std::uint32_t imageIndex)
-    {
-        if (imageIndex >= descriptors.setCount() ||
-            imageIndex >= imageTextureVersions_.size())
-        {
-            throw std::runtime_error("swapchain texture descriptor state is inconsistent");
-        }
-        if (imageTextureVersions_[imageIndex] == textureVersion_)
-        {
-            return;
-        }
-
-        descriptors.updateTextures(imageIndex, textureDescriptorInfos());
-        imageTextureVersions_[imageIndex] = textureVersion_;
-
-        for (auto retired = retiredTextures_.begin(); retired != retiredTextures_.end();)
-        {
-            const bool noLongerReferenced = std::ranges::all_of(imageTextureVersions_,
-                [&](std::uint64_t imageVersion)
-                {
-                    return imageVersion > retired->version;
-                });
-            if (!noLongerReferenced)
-            {
-                ++retired;
-                continue;
-            }
-            vkDestroySampler(device, retired->texture.sampler, nullptr);
-            retired->texture.sampler = VK_NULL_HANDLE;
-            retired = retiredTextures_.erase(retired);
-        }
+        scene_.initializeImageGenerations(descriptors.setCount());
     }
 
     void loadModel()
@@ -3418,563 +2662,238 @@ private:
         uploadSceneAsset(scene);
     }
 
-    [[nodiscard]] PreparedSceneData prepareReplacementScene(
+    [[nodiscard]] PreparedSceneData prepareSceneData(
         const danvulkan::assets::SceneAsset& scene) const
     {
-        if (!scene.skins().empty() || !scene.animations().empty())
-        {
-            throw std::runtime_error(
-                "animated whole-scene replacement is not yet supported");
-        }
-        if (scene.textures().empty() || scene.textures().size() > textureDescriptorCapacity_)
-        {
-            throw std::runtime_error(
-                "replacement scene texture count exceeds renderer capacity");
-        }
-        if (scene.materials().empty() || scene.materials().size() > materialCapacity_)
-        {
-            throw std::runtime_error(
-                "replacement scene material count exceeds renderer capacity");
-        }
-        if (scene.meshes().empty() || scene.meshes().size() >
-                static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
-        {
-            throw std::runtime_error("replacement scene contains an invalid mesh count");
-        }
-
-        for (const danvulkan::assets::TextureAsset& texture : scene.textures())
-        {
-            const std::uint64_t rowByteCount = static_cast<std::uint64_t>(texture.height) * 4;
-            const bool byteCountOverflow = texture.width != 0 &&
-                rowByteCount > std::numeric_limits<std::uint64_t>::max() / texture.width;
-            const std::uint64_t byteCount = byteCountOverflow ? 0 :
-                static_cast<std::uint64_t>(texture.width) * rowByteCount;
-            if (texture.width == 0 || texture.height == 0 ||
-                byteCountOverflow || byteCount != texture.rgba8.size())
-            {
-                throw std::runtime_error(
-                    "replacement scene contains invalid decoded texture data");
-            }
-        }
+        danvulkan::ScenePlan plan = danvulkan::planScene(scene, {
+            .textureCapacity = scene_.textureDescriptorCapacity_,
+            .materialCapacity = scene_.materialCapacity_,
+            .minimumVertexCapacity = config_.initialVertexCapacity,
+            .minimumIndexCapacity = config_.initialIndexCapacity,
+            .transformCapacity = TransformDataCount,
+            .drawCapacity = DrawDataCount,
+            .jointMatrixCapacity = JointMatrixCount,
+            .maximumVertexBufferBytes = device.properties().limits.maxStorageBufferRange
+        });
 
         PreparedSceneData prepared;
         prepared.generation = nextSceneGeneration();
+        prepared.vertexCapacity = plan.vertexCapacity;
+        prepared.indexCapacity = plan.indexCapacity;
+        prepared.uploadVertices = std::move(plan.vertices);
+        prepared.uploadIndices = std::move(plan.indices);
+        if (plan.usedVertexCount < plan.vertexCapacity)
+        {
+            prepared.freeVertexRanges.push_back(
+                {plan.usedVertexCount, plan.vertexCapacity - plan.usedVertexCount});
+        }
+        if (plan.usedIndexCount < plan.indexCapacity)
+        {
+            prepared.freeIndexRanges.push_back(
+                {plan.usedIndexCount, plan.indexCapacity - plan.usedIndexCount});
+        }
+
+        const auto textureIndex = [](danvulkan::assets::TextureHandle handle)
+        {
+            return handle ? static_cast<std::int32_t>(handle.slot) : -1;
+        };
         prepared.materials.reserve(scene.materials().size());
         prepared.materialNames.reserve(scene.materials().size());
-
-        const auto textureIndex = [&scene](danvulkan::assets::TextureHandle handle)
-            -> std::int32_t
-        {
-            if (!handle)
-            {
-                return -1;
-            }
-            if (scene.find(handle) == nullptr ||
-                handle.slot > static_cast<std::uint32_t>(
-                    std::numeric_limits<std::int32_t>::max()))
-            {
-                throw std::runtime_error(
-                    "replacement scene contains an invalid texture handle");
-            }
-            return static_cast<std::int32_t>(handle.slot);
-        };
-
         for (const danvulkan::assets::MaterialAsset& source : scene.materials())
         {
-            switch (source.alphaMode)
-            {
-            case danvulkan::assets::AlphaMode::opaque:
-            case danvulkan::assets::AlphaMode::mask:
-            case danvulkan::assets::AlphaMode::blend:
-                break;
-            default:
-                throw std::runtime_error(
-                    "replacement scene contains an invalid material alpha mode");
-            }
-
             MaterialData material{};
             material.baseColorFactor = source.albedoTint;
             material.emissiveMetallic = glm::vec4(source.emissiveFactor,
                 source.metallicFactor);
-            material.roughnessNormalOcclusionAlpha = {
-                source.roughnessFactor,
-                source.normalScale,
-                source.occlusionStrength,
-                source.alphaCutoff
-            };
+            material.roughnessNormalOcclusionAlpha = {source.roughnessFactor,
+                source.normalScale, source.occlusionStrength, source.alphaCutoff};
             material.textureTiling = glm::vec4(source.textureTiling, 0.0f, 0.0f);
-            material.textureIndices = {
-                textureIndex(source.albedoTexture),
-                textureIndex(source.normalTexture),
-                textureIndex(source.metallicRoughnessTexture),
-                textureIndex(source.occlusionTexture)
-            };
-            material.materialFlags = {
-                textureIndex(source.emissiveTexture),
-                static_cast<std::int32_t>(source.alphaMode),
-                source.doubleSided ? 1 : 0,
-                source.unlit ? 1 : 0
-            };
+            material.textureIndices = {textureIndex(source.albedoTexture),
+                textureIndex(source.normalTexture), textureIndex(source.metallicRoughnessTexture),
+                textureIndex(source.occlusionTexture)};
+            material.materialFlags = {textureIndex(source.emissiveTexture),
+                static_cast<std::int32_t>(source.alphaMode), source.doubleSided ? 1 : 0,
+                source.unlit ? 1 : 0};
             prepared.materials.push_back(material);
             prepared.materialNames.push_back(source.name);
         }
 
-        prepared.meshResources.resize(scene.meshes().size());
-        std::uint64_t usedVertexCount = 0;
-        std::uint64_t usedIndexCount = 0;
-        for (const danvulkan::assets::MeshAsset& source : scene.meshes())
+        prepared.meshResources.reserve(plan.meshes.size());
+        for (const danvulkan::PlannedSceneMesh& source : plan.meshes)
         {
-            if (scene.find(source.material) == nullptr ||
-                source.material.slot > static_cast<std::uint32_t>(
-                    std::numeric_limits<std::int32_t>::max()))
+            const MaterialData& material = prepared.materials.at(source.materialIndex);
+            prepared.meshResources.push_back({source.indexCount, source.vertexCount,
+                source.firstIndex, source.vertexOffset,
+                static_cast<std::int32_t>(source.materialIndex),
+                static_cast<std::uint32_t>(material.materialFlags.y * 2 +
+                    material.materialFlags.z),
+                source.bounds, source.name});
+        }
+        prepared.transforms.reserve(plan.transforms.size());
+        prepared.instanceNames.reserve(plan.transforms.size());
+        for (const danvulkan::PlannedSceneTransform& transform : plan.transforms)
+        {
+            prepared.transforms.push_back({transform.world});
+            prepared.instanceNames.push_back(transform.name);
+        }
+
+        if (!scene.skins().empty() || !scene.animations().empty())
+        {
+            prepared.animationPlayer.emplace(scene);
+        }
+        prepared.draws.reserve(plan.draws.size());
+        prepared.meshes.reserve(plan.draws.size());
+        prepared.bounds.reserve(plan.draws.size());
+        prepared.jointMatrices.reserve(plan.jointMatrixCount);
+        for (const danvulkan::PlannedSceneDraw& source : plan.draws)
+        {
+            const MeshResourceData& resource = prepared.meshResources.at(source.meshIndex);
+            DrawData draw{};
+            draw.materialIndex = resource.materialIndex;
+            draw.transformIndex = static_cast<std::int32_t>(source.transformIndex);
+            draw.vertexOffset = static_cast<std::int32_t>(resource.vertexOffset);
+            if (source.skin)
             {
-                throw std::runtime_error(
-                    "replacement scene contains an invalid material handle");
+                draw.jointOffset = static_cast<std::int32_t>(source.jointOffset);
             }
-            if (source.handle.slot >= prepared.meshResources.size() ||
-                source.vertices.empty() || source.indices.empty())
+            prepared.draws.push_back(draw);
+
+            MeshData mesh{};
+            mesh.indexCount = resource.indexCount;
+            mesh.firstIndex = resource.firstIndex;
+            mesh.vertexOffset = resource.vertexOffset;
+            mesh.pipelineVariant = resource.pipelineVariant;
+            mesh.meshResourceSlot = source.meshIndex;
+            mesh.drawData = draw;
+            mesh.localBounds = resource.bounds;
+            const std::uint32_t meshDataIndex =
+                static_cast<std::uint32_t>(prepared.meshes.size());
+            prepared.meshes.push_back(mesh);
+            prepared.bounds.push_back(source.worldBounds);
+            if (prepared.animationPlayer)
             {
-                throw std::runtime_error(
-                    "replacement scene contains invalid mesh geometry");
+                prepared.animatedDraws.push_back(
+                    {source.node, source.transformIndex, meshDataIndex});
             }
-            for (const std::uint32_t index : source.indices)
+            if (source.skin)
             {
-                if (index >= source.vertices.size())
+                prepared.skinnedDraws.push_back({source.node, source.skin,
+                    source.transformIndex, source.jointOffset, meshDataIndex});
+                if (prepared.jointMatrices.size() == source.jointOffset)
                 {
-                    throw std::runtime_error(
-                        "replacement scene contains an out-of-range vertex index");
+                    prepared.animationPlayer->appendSkinMatrices(
+                        source.skin, source.node, prepared.jointMatrices);
                 }
             }
-            if (usedVertexCount + source.vertices.size() >
-                    static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) ||
-                usedIndexCount + source.indices.size() >
-                    std::numeric_limits<std::uint32_t>::max())
-            {
-                throw std::runtime_error(
-                    "replacement scene geometry exceeds renderer offset limits");
-            }
-
-            MeshResourceData mesh;
-            mesh.indexCount = static_cast<std::uint32_t>(source.indices.size());
-            mesh.vertexCount = static_cast<std::uint32_t>(source.vertices.size());
-            mesh.firstIndex = static_cast<std::uint32_t>(usedIndexCount);
-            mesh.vertexOffset = static_cast<std::uint32_t>(usedVertexCount);
-            mesh.materialIndex = static_cast<std::int32_t>(source.material.slot);
-            const MaterialData& material = prepared.materials[source.material.slot];
-            mesh.pipelineVariant = static_cast<std::uint32_t>(material.materialFlags.y * 2 +
-                material.materialFlags.z);
-            mesh.bounds = source.bounds;
-            mesh.name = source.name;
-            prepared.meshResources[source.handle.slot] = std::move(mesh);
-
-            prepared.vertices.insert(prepared.vertices.end(), source.vertices.begin(),
-                source.vertices.end());
-            prepared.indices.insert(prepared.indices.end(), source.indices.begin(),
-                source.indices.end());
-            usedVertexCount += source.vertices.size();
-            usedIndexCount += source.indices.size();
         }
-
-        std::vector<bool> recursionStack(scene.nodes().size(), false);
-        std::function<void(danvulkan::assets::NodeHandle, const glm::mat4&)> visitNode;
-        visitNode = [&](danvulkan::assets::NodeHandle handle, const glm::mat4& parentTransform)
+        if (prepared.jointMatrices.size() != plan.jointMatrixCount)
         {
-            const danvulkan::assets::NodeAsset* node = scene.find(handle);
-            if (node == nullptr || handle.slot >= recursionStack.size())
-            {
-                throw std::runtime_error(
-                    "replacement scene contains an invalid node handle");
-            }
-            if (recursionStack[handle.slot])
-            {
-                throw std::runtime_error("replacement scene node hierarchy contains a cycle");
-            }
-            recursionStack[handle.slot] = true;
-
-            const glm::mat4 worldTransform = parentTransform * node->localTransform;
-            std::int32_t transformIndex = -1;
-            if (!node->meshes.empty())
-            {
-                if (prepared.transforms.size() >= TransformDataCount)
-                {
-                    throw std::runtime_error(
-                        "replacement scene exceeds renderer transform capacity");
-                }
-                transformIndex = static_cast<std::int32_t>(prepared.transforms.size());
-                prepared.transforms.push_back({ worldTransform });
-                prepared.instanceNames.push_back(node->name);
-            }
-
-            for (const danvulkan::assets::MeshHandle meshHandle : node->meshes)
-            {
-                if (scene.find(meshHandle) == nullptr ||
-                    meshHandle.slot >= prepared.meshResources.size())
-                {
-                    throw std::runtime_error(
-                        "replacement scene node contains an invalid mesh handle");
-                }
-                if (prepared.meshes.size() >= DrawDataCount)
-                {
-                    throw std::runtime_error(
-                        "replacement scene exceeds renderer draw capacity");
-                }
-
-                const MeshResourceData& resource = prepared.meshResources[meshHandle.slot];
-                DrawData draw{};
-                draw.materialIndex = resource.materialIndex;
-                draw.transformIndex = transformIndex;
-                draw.vertexOffset = static_cast<std::int32_t>(resource.vertexOffset);
-                prepared.draws.push_back(draw);
-
-                MeshData mesh{};
-                mesh.indexCount = resource.indexCount;
-                mesh.firstIndex = resource.firstIndex;
-                mesh.vertexOffset = resource.vertexOffset;
-                mesh.pipelineVariant = resource.pipelineVariant;
-                mesh.meshResourceSlot = meshHandle.slot;
-                mesh.drawData = draw;
-                mesh.localBounds = resource.bounds;
-                prepared.meshes.push_back(mesh);
-                prepared.bounds.push_back(transformedBounds(resource.bounds, worldTransform));
-            }
-
-            for (const danvulkan::assets::NodeHandle child : node->children)
-            {
-                visitNode(child, worldTransform);
-            }
-            recursionStack[handle.slot] = false;
-        };
-
-        for (const danvulkan::assets::NodeHandle root : scene.rootNodes())
-        {
-            visitNode(root, glm::mat4(1.0f));
-        }
-        if (prepared.draws.empty())
-        {
-            throw std::runtime_error("replacement scene contains no mesh instances");
-        }
-
-        prepared.vertexCapacity = std::max(config_.initialVertexCapacity,
-            static_cast<std::uint32_t>(usedVertexCount));
-        prepared.indexCapacity = std::max(config_.initialIndexCapacity,
-            static_cast<std::uint32_t>(usedIndexCount));
-        if (prepared.vertexCapacity == 0 || prepared.indexCapacity == 0)
-        {
-            throw std::runtime_error("replacement scene geometry capacity is invalid");
-        }
-
-        const VkPhysicalDeviceProperties& properties = device.properties();
-        if (sizeof(Vertex) * static_cast<VkDeviceSize>(prepared.vertexCapacity) >
-            properties.limits.maxStorageBufferRange)
-        {
-            throw std::runtime_error(
-                "replacement scene vertex capacity exceeds maxStorageBufferRange");
-        }
-
-        prepared.vertices.resize(prepared.vertexCapacity);
-        prepared.indices.resize(prepared.indexCapacity);
-        if (usedVertexCount < prepared.vertexCapacity)
-        {
-            prepared.freeVertexRanges.push_back({ static_cast<std::uint32_t>(usedVertexCount),
-                prepared.vertexCapacity - static_cast<std::uint32_t>(usedVertexCount) });
-        }
-        if (usedIndexCount < prepared.indexCapacity)
-        {
-            prepared.freeIndexRanges.push_back({ static_cast<std::uint32_t>(usedIndexCount),
-                prepared.indexCapacity - static_cast<std::uint32_t>(usedIndexCount) });
+            throw std::runtime_error("planned scene joint palette is inconsistent");
         }
         return prepared;
     }
 
     void uploadSceneAsset(const danvulkan::assets::SceneAsset& scene)
     {
-        sceneGeneration_ = nextGeneration(sceneGeneration_);
-        materialCapacity_ = std::min(config_.maxMaterials, MatDataCount);
-        if (materialCapacity_ == 0)
+        scene_.materialCapacity_ = std::min(config_.maxMaterials, MatDataCount);
+        if (scene_.materialCapacity_ == 0)
         {
             throw std::runtime_error("configured material capacity must be greater than zero");
         }
-        vertices.clear();
-        indices.clear();
-        vertexCapacity_ = 0;
-        indexCapacity_ = 0;
-        freeVertexRanges_.clear();
-        freeIndexRanges_.clear();
-        retiredGeometryRanges_.clear();
-        imageGeometryRangeVersions_.clear();
-        geometryRangeVersion_ = 1;
-        matData.clear();
-        transformData.clear();
-        materialNames.clear();
-        materialGenerations_.clear();
-        materialAlive_.clear();
-        freeMaterialSlots_.clear();
-        instanceNames.clear();
-        instanceGenerations.clear();
-        instanceAlive.clear();
-        freeInstanceSlots.clear();
-        meshResources.clear();
-        meshGenerations_.clear();
-        meshAlive_.clear();
-        freeMeshSlots_.clear();
-        drawData.clear();
-        meshData.clear();
-        aabbs.clear();
-        animationPlayer_.reset();
-        animatedDraws_.clear();
-        skinnedDraws_.clear();
-        jointMatrices_.clear();
-        textures.clear();
-        textureGenerations_.clear();
-        freeTextureSlots_.clear();
-        retiredTextures_.clear();
-        liveTextureCount_ = 0;
-        textureVersion_ = 1;
-
-        if (!scene.skins().empty() || !scene.animations().empty())
+        const VkPhysicalDeviceProperties& properties = device.properties();
+        const std::optional<std::uint32_t> textureCapacity =
+            danvulkan::vk::selectTextureDescriptorCapacity({config_.maxTextures,
+                static_cast<std::uint32_t>(scene.textures().size()),
+                properties.limits.maxPerStageDescriptorSamplers,
+                properties.limits.maxDescriptorSetSamplers});
+        if (!textureCapacity)
         {
-            animationPlayer_.emplace(scene);
+            throw std::runtime_error(
+                "configured bindless texture capacity is invalid for this scene or device");
         }
+        scene_.textureDescriptorCapacity_ = *textureCapacity;
+        PreparedSceneData prepared = prepareSceneData(scene);
+        scene_.sceneGeneration_ = prepared.generation;
+        scene_.vertexCapacity_ = 0;
+        scene_.indexCapacity_ = 0;
+        scene_.freeVertexRanges_.clear();
+        scene_.freeIndexRanges_.clear();
+        scene_.retiredGeometryRanges_.clear();
+        scene_.imageGeometryRangeVersions_.clear();
+        scene_.geometryRangeVersion_ = 1;
+        scene_.matData.clear();
+        scene_.transformData.clear();
+        scene_.materialNames.clear();
+        scene_.materialGenerations_.clear();
+        scene_.materialAlive_.clear();
+        scene_.freeMaterialSlots_.clear();
+        scene_.instanceNames.clear();
+        scene_.instanceGenerations.clear();
+        scene_.instanceAlive.clear();
+        scene_.freeInstanceSlots.clear();
+        scene_.meshResources.clear();
+        scene_.meshGenerations_.clear();
+        scene_.meshAlive_.clear();
+        scene_.freeMeshSlots_.clear();
+        scene_.drawData.clear();
+        scene_.meshData.clear();
+        scene_.aabbs.clear();
+        scene_.animationPlayer_.reset();
+        scene_.animatedDraws_.clear();
+        scene_.skinnedDraws_.clear();
+        scene_.jointMatrices_.clear();
+        scene_.textures.clear();
+        scene_.textureGenerations_.clear();
+        scene_.freeTextureSlots_.clear();
+        scene_.retiredTextures_.clear();
+        scene_.liveTextureCount_ = 0;
+        scene_.textureVersion_ = 1;
+
+        scene_.animationPlayer_ = std::move(prepared.animationPlayer);
+        scene_.animatedDraws_ = std::move(prepared.animatedDraws);
+        scene_.skinnedDraws_ = std::move(prepared.skinnedDraws);
+        scene_.jointMatrices_ = std::move(prepared.jointMatrices);
+
+        scene_.vertexBuffer = createDeviceLocalBuffer(
+            sizeof(Vertex) * static_cast<VkDeviceSize>(prepared.vertexCapacity),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, prepared.uploadVertices.data(),
+            sizeof(Vertex) * static_cast<VkDeviceSize>(prepared.uploadVertices.size()),
+            "scene vertex storage buffer");
+        scene_.indexBuffer = createDeviceLocalBuffer(
+            sizeof(std::uint32_t) * static_cast<VkDeviceSize>(prepared.indexCapacity),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT, prepared.uploadIndices.data(),
+            sizeof(std::uint32_t) * static_cast<VkDeviceSize>(prepared.uploadIndices.size()),
+            "scene index buffer");
 
         for (const danvulkan::assets::TextureAsset& texture : scene.textures())
         {
-            textures.emplace_back(createTextureImage(texture));
-            textureGenerations_.push_back(sceneGeneration_);
-            ++liveTextureCount_;
+            scene_.textures.emplace_back(createTextureImage(texture));
+            scene_.textureGenerations_.push_back(scene_.sceneGeneration_);
+            ++scene_.liveTextureCount_;
         }
 
-        const auto textureIndex = [&scene](danvulkan::assets::TextureHandle handle) -> std::int32_t
-        {
-            if (!handle)
-            {
-                return -1;
-            }
-            if (scene.find(handle) == nullptr ||
-                handle.slot > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
-            {
-                throw std::runtime_error("asset contains an invalid texture handle");
-            }
-            return static_cast<std::int32_t>(handle.slot);
-        };
+        scene_.matData = std::move(prepared.materials);
+        scene_.materialNames = std::move(prepared.materialNames);
+        scene_.materialGenerations_.assign(scene_.matData.size(), scene_.sceneGeneration_);
+        scene_.materialAlive_.assign(scene_.matData.size(), true);
 
-        for (const danvulkan::assets::MaterialAsset& source : scene.materials())
-        {
-            MaterialData material{};
-            material.baseColorFactor = source.albedoTint;
-            material.emissiveMetallic = glm::vec4(source.emissiveFactor, source.metallicFactor);
-            material.roughnessNormalOcclusionAlpha = {
-                source.roughnessFactor, source.normalScale, source.occlusionStrength, source.alphaCutoff
-            };
-            material.textureTiling = glm::vec4(source.textureTiling, 0.0f, 0.0f);
-            material.textureIndices = {
-                textureIndex(source.albedoTexture),
-                textureIndex(source.normalTexture),
-                textureIndex(source.metallicRoughnessTexture),
-                textureIndex(source.occlusionTexture)
-            };
-            material.materialFlags = {
-                textureIndex(source.emissiveTexture),
-                static_cast<std::int32_t>(source.alphaMode),
-                source.doubleSided ? 1 : 0,
-                source.unlit ? 1 : 0
-            };
-            matData.push_back(material);
-            materialNames.push_back(source.name);
-        }
-        if (matData.empty() || matData.size() > materialCapacity_)
-        {
-            throw std::runtime_error("configured material capacity is invalid for this scene");
-        }
-        materialGenerations_.assign(matData.size(), sceneGeneration_);
-        materialAlive_.assign(matData.size(), true);
+        scene_.meshResources = std::move(prepared.meshResources);
+        scene_.meshGenerations_.assign(scene_.meshResources.size(), scene_.sceneGeneration_);
+        scene_.meshAlive_.assign(scene_.meshResources.size(), true);
 
-        meshResources.resize(scene.meshes().size());
-        meshGenerations_.assign(scene.meshes().size(), sceneGeneration_);
-        meshAlive_.assign(scene.meshes().size(), false);
+        scene_.transformData = std::move(prepared.transforms);
+        scene_.instanceNames = std::move(prepared.instanceNames);
+        scene_.instanceGenerations.assign(scene_.transformData.size(), scene_.sceneGeneration_);
+        scene_.instanceAlive.assign(scene_.transformData.size(), true);
+        scene_.drawData = std::move(prepared.draws);
+        scene_.meshData = std::move(prepared.meshes);
+        scene_.aabbs = std::move(prepared.bounds);
 
-        for (const danvulkan::assets::MeshAsset& source : scene.meshes())
-        {
-            if (scene.find(source.material) == nullptr ||
-                source.material.slot > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
-            {
-                throw std::runtime_error("asset contains an invalid material handle");
-            }
-
-            if (source.handle.slot >= meshResources.size() ||
-                source.vertices.size() > static_cast<std::size_t>(
-                    std::numeric_limits<std::int32_t>::max()) - vertices.size() ||
-                source.indices.size() > static_cast<std::size_t>(
-                    std::numeric_limits<std::uint32_t>::max()) - indices.size())
-            {
-                throw std::runtime_error("asset geometry exceeds renderer index limits");
-            }
-
-            const auto vertexOffset = static_cast<std::uint32_t>(vertices.size());
-            const auto firstIndex = static_cast<std::uint32_t>(indices.size());
-            vertices.insert(vertices.end(), source.vertices.begin(), source.vertices.end());
-            indices.insert(indices.end(), source.indices.begin(), source.indices.end());
-
-            MeshResourceData uploaded;
-            uploaded.indexCount = static_cast<std::uint32_t>(source.indices.size());
-            uploaded.vertexCount = static_cast<std::uint32_t>(source.vertices.size());
-            uploaded.firstIndex = firstIndex;
-            uploaded.vertexOffset = vertexOffset;
-            uploaded.materialIndex = static_cast<std::int32_t>(source.material.slot);
-            const MaterialData& material = matData[source.material.slot];
-            uploaded.pipelineVariant = static_cast<std::uint32_t>(material.materialFlags.y * 2 +
-                material.materialFlags.z);
-            uploaded.bounds = source.bounds;
-            uploaded.name = source.name;
-            meshResources[source.handle.slot] = std::move(uploaded);
-            meshAlive_[source.handle.slot] = true;
-        }
-
-        std::vector<bool> recursionStack(scene.nodes().size(), false);
-        std::function<void(danvulkan::assets::NodeHandle, const glm::mat4&)> visitNode;
-        visitNode = [&](danvulkan::assets::NodeHandle handle, const glm::mat4& parentTransform)
-        {
-            const danvulkan::assets::NodeAsset* node = scene.find(handle);
-            if (node == nullptr || handle.slot >= recursionStack.size())
-            {
-                throw std::runtime_error("asset contains an invalid node handle");
-            }
-            if (recursionStack[handle.slot])
-            {
-                throw std::runtime_error("asset node hierarchy contains a cycle");
-            }
-            recursionStack[handle.slot] = true;
-
-            const glm::mat4 worldTransform = parentTransform * node->localTransform;
-            std::int32_t transformIndex = -1;
-            if (!node->meshes.empty())
-            {
-                if (transformData.size() >= TransformDataCount)
-                {
-                    throw std::runtime_error("asset exceeds the renderer transform capacity");
-                }
-                transformIndex = static_cast<std::int32_t>(transformData.size());
-                transformData.push_back(TransformData{ worldTransform });
-                instanceNames.push_back(node->name);
-                instanceGenerations.push_back(sceneGeneration_);
-                instanceAlive.push_back(true);
-            }
-
-            for (const danvulkan::assets::MeshHandle meshHandle : node->meshes)
-            {
-                if (scene.find(meshHandle) == nullptr || meshHandle.slot >= meshResources.size())
-                {
-                    throw std::runtime_error("asset node contains an invalid mesh handle");
-                }
-                if (meshData.size() >= DrawDataCount)
-                {
-                    throw std::runtime_error("asset exceeds the renderer draw capacity");
-                }
-
-                const MeshResourceData& uploaded = meshResources[meshHandle.slot];
-                DrawData draw{};
-                draw.materialIndex = uploaded.materialIndex;
-                draw.transformIndex = transformIndex;
-                draw.vertexOffset = static_cast<std::int32_t>(uploaded.vertexOffset);
-                std::uint32_t jointOffset = 0;
-                if (node->skin)
-                {
-                    if (!animationPlayer_ || scene.find(node->skin) == nullptr)
-                    {
-                        throw std::runtime_error("asset node contains an invalid skin handle");
-                    }
-                    const danvulkan::assets::MeshAsset* sourceMesh = scene.find(meshHandle);
-                    const danvulkan::assets::SkinAsset* skin = scene.find(node->skin);
-                    for (const Vertex& vertex : sourceMesh->vertices)
-                    {
-                        for (glm::length_t component = 0; component < 4; ++component)
-                        {
-                            if (vertex.weights[component] > 0.0f &&
-                                vertex.joints[component] >= skin->joints.size())
-                            {
-                                throw std::runtime_error(
-                                    "asset vertex references an out-of-range skin joint");
-                            }
-                        }
-                    }
-                    jointOffset = static_cast<std::uint32_t>(jointMatrices_.size());
-                    draw.jointOffset = static_cast<std::int32_t>(jointOffset);
-                    animationPlayer_->appendSkinMatrices(
-                        node->skin, handle, jointMatrices_);
-                    if (jointMatrices_.size() > JointMatrixCount)
-                    {
-                        throw std::runtime_error(
-                            "asset exceeds the renderer joint matrix capacity");
-                    }
-                }
-                drawData.push_back(draw);
-
-                MeshData mesh{};
-                mesh.indexCount = uploaded.indexCount;
-                mesh.firstIndex = uploaded.firstIndex;
-                mesh.vertexOffset = uploaded.vertexOffset;
-                mesh.pipelineVariant = uploaded.pipelineVariant;
-                mesh.meshResourceSlot = meshHandle.slot;
-                mesh.drawData = draw;
-                mesh.localBounds = uploaded.bounds;
-                const std::uint32_t meshDataIndex = static_cast<std::uint32_t>(meshData.size());
-                meshData.push_back(mesh);
-                aabbs.push_back(transformedBounds(uploaded.bounds, worldTransform));
-                if (animationPlayer_)
-                {
-                    animatedDraws_.push_back({ handle,
-                        static_cast<std::uint32_t>(transformIndex), meshDataIndex });
-                }
-                if (node->skin)
-                {
-                    skinnedDraws_.push_back({ handle, node->skin,
-                        static_cast<std::uint32_t>(transformIndex), jointOffset, meshDataIndex });
-                }
-            }
-
-            for (const danvulkan::assets::NodeHandle child : node->children)
-            {
-                visitNode(child, worldTransform);
-            }
-            recursionStack[handle.slot] = false;
-        };
-
-        for (const danvulkan::assets::NodeHandle root : scene.rootNodes())
-        {
-            visitNode(root, glm::mat4(1.0f));
-        }
-        if (drawData.empty())
-        {
-            throw std::runtime_error("asset scene contains no mesh instances");
-        }
-
-        const std::uint32_t usedVertexCount = static_cast<std::uint32_t>(vertices.size());
-        const std::uint32_t usedIndexCount = static_cast<std::uint32_t>(indices.size());
-        vertexCapacity_ = std::max(config_.initialVertexCapacity, usedVertexCount);
-        indexCapacity_ = std::max(config_.initialIndexCapacity, usedIndexCount);
-        if (vertexCapacity_ == 0 || indexCapacity_ == 0 ||
-            vertexCapacity_ > static_cast<std::uint32_t>(
-                std::numeric_limits<std::int32_t>::max()))
-        {
-            throw std::runtime_error("configured initial geometry capacity is invalid");
-        }
-
-        const VkPhysicalDeviceProperties& physicalDeviceProperties = device.properties();
-        if (sizeof(Vertex) * static_cast<VkDeviceSize>(vertexCapacity_) >
-            physicalDeviceProperties.limits.maxStorageBufferRange)
-        {
-            throw std::runtime_error("configured vertex capacity exceeds maxStorageBufferRange");
-        }
-
-        vertices.resize(vertexCapacity_);
-        indices.resize(indexCapacity_);
-        if (usedVertexCount < vertexCapacity_)
-        {
-            freeVertexRanges_.push_back({ usedVertexCount, vertexCapacity_ - usedVertexCount });
-        }
-        if (usedIndexCount < indexCapacity_)
-        {
-            freeIndexRanges_.push_back({ usedIndexCount, indexCapacity_ - usedIndexCount });
-        }
+        scene_.vertexCapacity_ = prepared.vertexCapacity;
+        scene_.indexCapacity_ = prepared.indexCapacity;
+        scene_.freeVertexRanges_ = std::move(prepared.freeVertexRanges);
+        scene_.freeIndexRanges_ = std::move(prepared.freeIndexRanges);
+        scene_.reserveFrameScratch();
     }
 
     void checkFilesChanged()
@@ -4034,12 +2953,12 @@ private:
 
         glm::vec3 sceneCenter(0.0f);
         float sceneRadius = 1.0f;
-        if (!aabbs.empty())
+        if (!scene_.aabbs.empty())
         {
             const float maximum = std::numeric_limits<float>::max();
             glm::vec3 sceneMinimum(maximum);
             glm::vec3 sceneMaximum(-maximum);
-            for (const AABB& bounds : aabbs)
+            for (const AABB& bounds : scene_.aabbs)
             {
                 sceneMinimum = glm::min(sceneMinimum, bounds.minVertex);
                 sceneMaximum = glm::max(sceneMaximum, bounds.maxVertex);
@@ -4080,7 +2999,7 @@ private:
         pl.color = glm::vec3(1.0f, 1.0f, 1.0f);
         pointLights.push_back(pl);
         /* lion head spots
-        DrawData lion1 = drawData[375], lion2 = drawData[376];
+        DrawData lion1 = scene_.drawData[375], lion2 = scene_.drawData[376];
         Vertex v1 = vertices[lion1.vertexOffset];
         Vertex v2 = vertices[lion2.vertexOffset];
 
@@ -4158,6 +3077,16 @@ std::vector<SceneAnimationInfo> VulkanRenderer::sceneAnimations() const
 AnimationPlaybackState VulkanRenderer::animationPlaybackState() const
 {
     return impl_->animationPlaybackState();
+}
+
+RendererPerformanceStats VulkanRenderer::performanceStats() const noexcept
+{
+    return impl_ != nullptr ? impl_->performanceStats() : RendererPerformanceStats{};
+}
+
+RendererMemoryStats VulkanRenderer::memoryStats() const noexcept
+{
+    return impl_ != nullptr ? impl_->memoryStats() : RendererMemoryStats{};
 }
 
 void VulkanRenderer::playAnimation(SceneAnimationHandle animation, bool restart)

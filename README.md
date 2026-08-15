@@ -4,10 +4,9 @@ DanVulkan is a Vulkan 1.4 rendering sandbox being refactored from an older Visua
 
 ## Requirements
 
-- Windows 10 or 11
-- Visual Studio 2022 with the **Desktop development with C++** workload
+- Windows 10 or 11 with Visual Studio 2022 and the **Desktop development with C++** workload, or macOS 15+ with Apple Clang
 - A Vulkan 1.4-capable driver
-- The Vulkan SDK 1.4.x with `VULKAN_SDK` set
+- The Vulkan SDK 1.4.x with `VULKAN_SDK` set (the macOS SDK includes MoltenVK)
 - CMake 3.25 or newer
 - Git (CMake downloads pinned third-party dependencies on the first configure)
 
@@ -33,6 +32,20 @@ cmake --build --preset debug
 Run the CPU asset, animation-player, and device-planning tests plus validation-layer standalone-loop, step-driven, and resize smoke tests with `ctest --preset debug`.
 
 Run the executable with the repository root as its working directory so it can find `models/` and `textures/`.
+
+## macOS with MoltenVK
+
+Install the current macOS Vulkan SDK from LunarG, then source its `setup-env.sh` in each new terminal so CMake, the Vulkan loader, MoltenVK, validation layers, and `glslc` can be found. Configure and build the native Debug preset with:
+
+```bash
+source /path/to/VulkanSDK/1.4.x.x/setup-env.sh
+cmake --preset macos
+cmake --build --preset macos-debug
+ctest --preset macos-debug
+./build/macos/DanVulkan
+```
+
+Use `cmake --preset macos-release` followed by `cmake --build --preset macos-release` for an optimized build. The renderer enables portability enumeration when the loader exposes it, enables MoltenVK's required portability-subset device extension, and disables the configured sampler LOD bias only when that portability feature is unavailable.
 
 ## Module boundary
 

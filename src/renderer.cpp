@@ -1815,6 +1815,39 @@ private:
         }
         std::vector<const char*> extensions(platformExtensions.begin(), platformExtensions.end());
 
+        std::uint32_t availableExtensionCount = 0;
+        checkVk(vkEnumerateInstanceExtensionProperties(
+            nullptr, &availableExtensionCount, nullptr),
+            "vkEnumerateInstanceExtensionProperties(count)");
+        std::vector<VkExtensionProperties> availableExtensions(availableExtensionCount);
+        if (availableExtensionCount > 0)
+        {
+            checkVk(vkEnumerateInstanceExtensionProperties(
+                nullptr, &availableExtensionCount, availableExtensions.data()),
+                "vkEnumerateInstanceExtensionProperties");
+        }
+        const bool portabilityEnumerationAvailable = std::any_of(
+            availableExtensions.begin(), availableExtensions.end(),
+            [](const VkExtensionProperties& extension)
+            {
+                return std::string_view(extension.extensionName) ==
+                    VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+            });
+        if (portabilityEnumerationAvailable)
+        {
+            const bool alreadyEnabled = std::any_of(
+                extensions.begin(), extensions.end(), [](const char* extension)
+                {
+                    return std::string_view(extension) ==
+                        VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+                });
+            if (!alreadyEnabled)
+            {
+                extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+            }
+            createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        }
+
         if (enableValidationLayers)
         {
             extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -2363,8 +2396,10 @@ private:
         samplerInfo.mipmapMode = texture.samplerConfig.mipmapMode ==
                 danvulkan::assets::TextureMipmapMode::nearest
             ? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        samplerInfo.mipLodBias = std::clamp(config_.textureMipLodBias,
-            -properties.limits.maxSamplerLodBias, properties.limits.maxSamplerLodBias);
+        samplerInfo.mipLodBias = device.supportsSamplerMipLodBias()
+            ? std::clamp(config_.textureMipLodBias,
+                -properties.limits.maxSamplerLodBias, properties.limits.maxSamplerLodBias)
+            : 0.0f;
         samplerInfo.minLod = 0.0f;
         samplerInfo.maxLod = static_cast<float>(texture.mipLevels - 1);
 
@@ -3971,11 +4006,19 @@ private:
     void shaderFileChanged(std::filesystem::path shaderSourceFile)
     {
         std::string filePath = shaderSourceFile.string();
-        std::string compiledPath = shaderSourceFile.replace_extension(".spv").string();
+        const std::filesystem::path compiledPath = std::filesystem::path(COMPILED_SHADER_PATH) /
+            (shaderSourceFile.stem().string() + ".spv");
         std::array<char, 128> buffer;
         std::string result;
-        std::string cmd = "glslc.exe " + filePath + " -o " +  compiledPath;
+#ifdef _WIN32
+        const std::string cmd = "glslc.exe --target-env=vulkan1.4 \"" + filePath +
+            "\" -o \"" + compiledPath.string() + "\" 2>&1";
         std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd.c_str(), "r"), _pclose);
+#else
+        const std::string cmd = "glslc --target-env=vulkan1.4 \"" + filePath +
+            "\" -o \"" + compiledPath.string() + "\" 2>&1";
+        std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+#endif
         if (!pipe) {
             throw std::runtime_error("failed to send shell command for shader reload");
         }

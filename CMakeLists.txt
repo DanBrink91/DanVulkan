@@ -67,7 +67,7 @@ endif()
 find_program(
     GLSLC_EXECUTABLE
     NAMES glslc glslc.exe
-    HINTS "$ENV{VULKAN_SDK}/Bin"
+    HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK}/Bin"
     REQUIRED
 )
 
@@ -148,6 +148,11 @@ target_compile_definitions(
         DANVULKAN_SHADER_DIR="${SHADER_OUTPUT_DIR}/"
         GLFW_INCLUDE_VULKAN
 )
+if(APPLE)
+    # VK_KHR_portability_subset declarations are provisional in the Vulkan headers.
+    # MoltenVK exposes this extension and requires applications to enable it.
+    target_compile_definitions(danvulkan_renderer PRIVATE VK_ENABLE_BETA_EXTENSIONS)
+endif()
 target_link_libraries(
     danvulkan_renderer
     PUBLIC DanVulkan::Assets Vulkan::Vulkan glm::glm

@@ -42,6 +42,10 @@ public:
     {
         return properties_;
     }
+    [[nodiscard]] bool supportsSamplerMipLodBias() const noexcept
+    {
+        return samplerMipLodBiasSupported_;
+    }
     [[nodiscard]] VkSampleCountFlagBits maxUsableSampleCount() const noexcept;
     [[nodiscard]] SwapchainSupportDetails querySwapchainSupport(VkSurfaceKHR surface) const;
 
@@ -55,5 +59,6 @@ private:
     VkQueue presentQueue_ = VK_NULL_HANDLE;
     QueueFamilyIndices queueFamilies_;
     VkPhysicalDeviceProperties properties_{};
+    bool samplerMipLodBiasSupported_ = true;
 };
 }

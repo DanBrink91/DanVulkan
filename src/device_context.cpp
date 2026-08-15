@@ -16,11 +16,14 @@ namespace danvulkan::vk
 namespace
 {
 constexpr std::array<const char*, 1> requiredExtensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+constexpr std::string_view portabilitySubsetExtension = "VK_KHR_portability_subset";
 
 struct ProbedDevice
 {
     VkPhysicalDevice handle = VK_NULL_HANDLE;
     DeviceCandidateCapabilities capabilities;
+    bool portabilitySubset = false;
+    bool samplerMipLodBiasSupported = true;
 };
 
 SwapchainSupportDetails querySwapchainSupport(
@@ -81,7 +84,7 @@ QueueFamilyIndices queryQueueFamilies(VkPhysicalDevice physicalDevice, VkSurface
     return selectQueueFamilies(capabilities);
 }
 
-bool supportsRequiredExtensions(VkPhysicalDevice physicalDevice)
+std::vector<VkExtensionProperties> queryDeviceExtensions(VkPhysicalDevice physicalDevice)
 {
     std::uint32_t extensionCount = 0;
     check(vkEnumerateDeviceExtensionProperties(
@@ -95,21 +98,28 @@ bool supportsRequiredExtensions(VkPhysicalDevice physicalDevice)
             "vkEnumerateDeviceExtensionProperties");
     }
 
+    available.resize(extensionCount);
+    return available;
+}
+
+bool hasExtension(
+    const std::vector<VkExtensionProperties>& available, std::string_view name)
+{
+    for (const VkExtensionProperties& extension : available)
+    {
+        if (std::string_view(extension.extensionName) == name)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool supportsRequiredExtensions(const std::vector<VkExtensionProperties>& available)
+{
     for (const char* required : requiredExtensions)
     {
-        bool found = false;
-        for (const VkExtensionProperties& extension : available)
-        {
-            if (std::string_view(extension.extensionName) == required)
-            {
-                found = true;
-                break;
-            }
-        }
-        if (!found)
-        {
-            return false;
-        }
+        if (!hasExtension(available, required)) return false;
     }
     return true;
 }
@@ -131,7 +141,10 @@ ProbedDevice probeDevice(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface)
     ProbedDevice result;
     result.handle = physicalDevice;
     result.capabilities.queueFamilies = queryQueueFamilies(physicalDevice, surface);
-    result.capabilities.requiredExtensions = supportsRequiredExtensions(physicalDevice);
+    const std::vector<VkExtensionProperties> extensions =
+        queryDeviceExtensions(physicalDevice);
+    result.capabilities.requiredExtensions = supportsRequiredExtensions(extensions);
+    result.portabilitySubset = hasExtension(extensions, portabilitySubsetExtension);
 
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physicalDevice, &properties);
@@ -153,11 +166,29 @@ ProbedDevice probeDevice(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface)
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     VkPhysicalDeviceVulkan13Features vulkan13{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+#if defined(VK_ENABLE_BETA_EXTENSIONS)
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilitySubset{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR };
+    if (result.portabilitySubset)
+    {
+        vulkan13.pNext = &portabilitySubset;
+    }
+#endif
     VkPhysicalDeviceFeatures2 features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     features.pNext = &vulkan11;
     vulkan11.pNext = &vulkan12;
     vulkan12.pNext = &vulkan13;
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
+
+    if (result.portabilitySubset)
+    {
+#if defined(VK_ENABLE_BETA_EXTENSIONS)
+        result.samplerMipLodBiasSupported = portabilitySubset.samplerMipLodBias == VK_TRUE;
+#else
+        // Be conservative if this build's headers hide the provisional feature struct.
+        result.samplerMipLodBiasSupported = false;
+#endif
+    }
 
     result.capabilities.features = {
         features.features.samplerAnisotropy == VK_TRUE,
@@ -247,6 +278,7 @@ void DeviceContext::initialize(
 
     physicalDevice_ = probed[*selected].handle;
     queueFamilies_ = probed[*selected].capabilities.queueFamilies;
+    samplerMipLodBiasSupported_ = probed[*selected].samplerMipLodBiasSupported;
     vkGetPhysicalDeviceProperties(physicalDevice_, &properties_);
 
     const float priority = 1.0f;
@@ -275,6 +307,15 @@ void DeviceContext::initialize(
     vulkan13.shaderDemoteToHelperInvocation = VK_TRUE;
     vulkan13.synchronization2 = VK_TRUE;
     vulkan13.dynamicRendering = VK_TRUE;
+#if defined(VK_ENABLE_BETA_EXTENSIONS)
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilitySubset{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR };
+    if (probed[*selected].portabilitySubset)
+    {
+        portabilitySubset.samplerMipLodBias = samplerMipLodBiasSupported_ ? VK_TRUE : VK_FALSE;
+        vulkan13.pNext = &portabilitySubset;
+    }
+#endif
     VkPhysicalDeviceFeatures2 features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     features.features.samplerAnisotropy = VK_TRUE;
     features.features.sampleRateShading = VK_TRUE;
@@ -288,8 +329,13 @@ void DeviceContext::initialize(
     createInfo.pNext = &features;
     createInfo.queueCreateInfoCount = static_cast<std::uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
-    createInfo.enabledExtensionCount = static_cast<std::uint32_t>(requiredExtensions.size());
-    createInfo.ppEnabledExtensionNames = requiredExtensions.data();
+    std::vector<const char*> enabledExtensions(requiredExtensions.begin(), requiredExtensions.end());
+    if (probed[*selected].portabilitySubset)
+    {
+        enabledExtensions.push_back(portabilitySubsetExtension.data());
+    }
+    createInfo.enabledExtensionCount = static_cast<std::uint32_t>(enabledExtensions.size());
+    createInfo.ppEnabledExtensionNames = enabledExtensions.data();
     check(vkCreateDevice(physicalDevice_, &createInfo, nullptr, device_.put()),
         "vkCreateDevice");
 
@@ -319,6 +365,7 @@ void DeviceContext::reset() noexcept
     presentQueue_ = VK_NULL_HANDLE;
     queueFamilies_ = {};
     properties_ = {};
+    samplerMipLodBiasSupported_ = true;
 }
 
 VkSampleCountFlagBits DeviceContext::maxUsableSampleCount() const noexcept

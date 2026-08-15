@@ -6,6 +6,9 @@
       "type": "shell",
       "command": "cmake",
       "args": ["--preset", "windows"],
+      "osx": {
+        "args": ["--preset", "macos"]
+      },
       "problemMatcher": []
     },
     {
@@ -13,28 +16,41 @@
       "type": "shell",
       "command": "cmake",
       "args": ["--build", "--preset", "debug"],
+      "osx": {
+        "args": ["--build", "--preset", "macos-debug"],
+        "problemMatcher": "$gcc"
+      },
       "dependsOn": "CMake: configure",
       "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build"
+      }
+    },
+    {
+      "label": "DanVulkan: build and run",
+      "type": "shell",
+      "command": "${workspaceFolder}\\build\\windows\\Debug\\DanVulkan.exe",
+      "osx": {
+        "command": "${workspaceFolder}/build/macos/DanVulkan"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "CMake: build (Debug)",
+      "problemMatcher": [],
       "group": {
         "kind": "build",
         "isDefault": true
       }
     },
     {
-      "label": "DanVulkan: run",
-      "type": "shell",
-      "command": "${workspaceFolder}\\build\\windows\\Debug\\DanVulkan.exe",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "dependsOn": "CMake: build (Debug)",
-      "problemMatcher": []
-    },
-    {
       "label": "DanVulkan: validation tests",
       "type": "shell",
       "command": "ctest",
       "args": ["--preset", "debug"],
+      "osx": {
+        "args": ["--preset", "macos-debug"]
+      },
       "dependsOn": "CMake: build (Debug)",
       "problemMatcher": []
     }

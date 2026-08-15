@@ -27,11 +27,14 @@ VkDescriptorSetLayoutBinding makeBinding(DescriptorBinding binding,
 std::optional<std::uint32_t> selectTextureDescriptorCapacity(
     const DescriptorCapacityLimits& limits) noexcept
 {
-    const std::uint32_t capacity = std::min({
-        limits.requestedTextures,
-        limits.maxPerStageSamplers,
-        limits.maxDescriptorSetSamplers
-    });
+    if (limits.reservedSamplers >= limits.maxPerStageSamplers ||
+        limits.reservedSamplers >= limits.maxDescriptorSetSamplers)
+    {
+        return std::nullopt;
+    }
+    const std::uint32_t capacity = std::min({limits.requestedTextures,
+        limits.maxPerStageSamplers - limits.reservedSamplers,
+        limits.maxDescriptorSetSamplers - limits.reservedSamplers});
     if (capacity == 0 || limits.requiredTextures == 0 ||
         limits.requiredTextures > capacity)
     {
@@ -47,11 +50,11 @@ std::optional<DescriptorPlan> planDescriptors(
     {
         return std::nullopt;
     }
-    constexpr std::uint64_t storageBindingsPerSet = 5;
+    constexpr std::uint64_t storageBindingsPerSet = 6;
     const std::uint64_t storageCount =
         static_cast<std::uint64_t>(setCount) * storageBindingsPerSet;
-    const std::uint64_t textureCount =
-        static_cast<std::uint64_t>(setCount) * textureCapacity;
+    const std::uint64_t textureCount = static_cast<std::uint64_t>(setCount) *
+        (static_cast<std::uint64_t>(textureCapacity) + 3U);
     if (storageCount > std::numeric_limits<std::uint32_t>::max() ||
         textureCount > std::numeric_limits<std::uint32_t>::max())
     {
@@ -75,7 +78,15 @@ std::optional<DescriptorPlan> planDescriptors(
         makeBinding(DescriptorBinding::textures, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             textureCapacity, VK_SHADER_STAGE_FRAGMENT_BIT),
         makeBinding(DescriptorBinding::joints, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-            VK_SHADER_STAGE_VERTEX_BIT)
+            VK_SHADER_STAGE_VERTEX_BIT),
+        makeBinding(DescriptorBinding::pointLights, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+            VK_SHADER_STAGE_FRAGMENT_BIT),
+        makeBinding(DescriptorBinding::irradiance,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT),
+        makeBinding(DescriptorBinding::prefilteredSpecular,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT),
+        makeBinding(DescriptorBinding::environmentBrdf,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT)
     };
     plan.poolSizes = {
         VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, setCount },

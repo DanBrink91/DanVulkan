@@ -103,7 +103,8 @@ void DescriptorContext::validateBuffer(BufferDescriptor buffer, const char* role
 
 void DescriptorContext::writeSet(VkDescriptorSet set,
     const DescriptorSetBindings& bindings,
-    std::span<const VkDescriptorImageInfo> textures) const
+    std::span<const VkDescriptorImageInfo> textures,
+    std::span<const VkDescriptorImageInfo> environment) const
 {
     validateBuffer(bindings.uniform, "uniform");
     validateBuffer(bindings.material, "material");
@@ -111,6 +112,7 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
     validateBuffer(bindings.transform, "transform");
     validateBuffer(bindings.vertex, "vertex");
     validateBuffer(bindings.joints, "joint");
+    validateBuffer(bindings.pointLights, "point-light");
     if (textures.size() != textureCapacity_)
     {
         throw std::invalid_argument("texture descriptor count does not match context capacity");
@@ -120,6 +122,18 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
         if (texture.sampler == VK_NULL_HANDLE || texture.imageView == VK_NULL_HANDLE)
         {
             throw std::invalid_argument("texture descriptors require a sampler and image view");
+        }
+    }
+    if (environment.size() != 3)
+    {
+        throw std::invalid_argument("environment requires irradiance, specular, and BRDF maps");
+    }
+    for (const VkDescriptorImageInfo& image : environment)
+    {
+        if (image.sampler == VK_NULL_HANDLE || image.imageView == VK_NULL_HANDLE)
+        {
+            throw std::invalid_argument(
+                "environment descriptors require a sampler and image view");
         }
     }
 
@@ -135,7 +149,9 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
         VkDescriptorBufferInfo{ bindings.vertex.buffer, bindings.vertex.offset,
             bindings.vertex.range },
         VkDescriptorBufferInfo{ bindings.joints.buffer, bindings.joints.offset,
-            bindings.joints.range }
+            bindings.joints.range },
+        VkDescriptorBufferInfo{ bindings.pointLights.buffer, bindings.pointLights.offset,
+            bindings.pointLights.range }
     };
     const std::array roles{
         DescriptorBinding::uniform,
@@ -143,7 +159,8 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
         DescriptorBinding::draw,
         DescriptorBinding::transform,
         DescriptorBinding::vertex,
-        DescriptorBinding::joints
+        DescriptorBinding::joints,
+        DescriptorBinding::pointLights
     };
     const std::array types{
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -151,9 +168,10 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
     };
-    std::array<VkWriteDescriptorSet, 7> writes{};
+    std::array<VkWriteDescriptorSet, 11> writes{};
     for (std::size_t index = 0; index < bufferInfos.size(); ++index)
     {
         writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -163,19 +181,33 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
         writes[index].descriptorType = types[index];
         writes[index].pBufferInfo = &bufferInfos[index];
     }
-    VkWriteDescriptorSet& textureWrite = writes.back();
+    VkWriteDescriptorSet& textureWrite = writes[bufferInfos.size()];
     textureWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     textureWrite.dstSet = set;
     textureWrite.dstBinding = bindingIndex(DescriptorBinding::textures);
     textureWrite.descriptorCount = static_cast<std::uint32_t>(textures.size());
     textureWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     textureWrite.pImageInfo = textures.data();
+    constexpr std::array environmentRoles{DescriptorBinding::irradiance,
+        DescriptorBinding::prefilteredSpecular, DescriptorBinding::environmentBrdf};
+    for (std::size_t index = 0; index < environment.size(); ++index)
+    {
+        VkWriteDescriptorSet& environmentWrite =
+            writes[bufferInfos.size() + 1U + index];
+        environmentWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        environmentWrite.dstSet = set;
+        environmentWrite.dstBinding = bindingIndex(environmentRoles[index]);
+        environmentWrite.descriptorCount = 1;
+        environmentWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        environmentWrite.pImageInfo = &environment[index];
+    }
     vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()),
         writes.data(), 0, nullptr);
 }
 
 void DescriptorContext::allocateSets(std::span<const DescriptorSetBindings> bindings,
-    std::span<const VkDescriptorImageInfo> textures)
+    std::span<const VkDescriptorImageInfo> textures,
+    std::span<const VkDescriptorImageInfo> environment)
 {
     if (layout_ == VK_NULL_HANDLE)
     {
@@ -212,7 +244,7 @@ void DescriptorContext::allocateSets(std::span<const DescriptorSetBindings> bind
             device_, &allocateInfo, replacementSets.data()), "vkAllocateDescriptorSets");
         for (std::size_t index = 0; index < replacementSets.size(); ++index)
         {
-            writeSet(replacementSets[index], bindings[index], textures);
+            writeSet(replacementSets[index], bindings[index], textures, environment);
             if (enableDebugNames_)
             {
                 setDebugName(device_, VK_OBJECT_TYPE_DESCRIPTOR_SET, replacementSets[index],

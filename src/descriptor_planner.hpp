@@ -16,7 +16,11 @@ enum class DescriptorBinding : std::uint32_t
     transform = 3,
     vertex = 4,
     textures = 5,
-    joints = 6
+    joints = 6,
+    pointLights = 7,
+    irradiance = 8,
+    prefilteredSpecular = 9,
+    environmentBrdf = 10
 };
 
 struct DescriptorCapacityLimits
@@ -25,11 +29,12 @@ struct DescriptorCapacityLimits
     std::uint32_t requiredTextures = 0;
     std::uint32_t maxPerStageSamplers = 0;
     std::uint32_t maxDescriptorSetSamplers = 0;
+    std::uint32_t reservedSamplers = 3;
 };
 
 struct DescriptorPlan
 {
-    static constexpr std::size_t bindingCount = 7;
+    static constexpr std::size_t bindingCount = 11;
     static constexpr std::size_t poolSizeCount = 3;
 
     std::uint32_t textureCapacity = 0;

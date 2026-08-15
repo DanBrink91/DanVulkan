@@ -72,6 +72,27 @@ int main()
     require(scene.cpuScratchBytes() != 0,
         "draw preparation scratch must be retained for subsequent frames");
 
+    const AnimationUpdateSettings animationSettings{
+        true, 0.25f, 0.5f, 30.0f, 15.0f
+    };
+    const danvulkan::AnimationPlayer::InstanceUpdatePolicy nearPolicy =
+        SceneContext::planActorAnimationUpdate(nearBounds, glm::mat4(1.0f),
+            glm::mat4(1.0f), glm::vec3(0.0f), animationSettings);
+    const danvulkan::AnimationPlayer::InstanceUpdatePolicy middlePolicy =
+        SceneContext::planActorAnimationUpdate(middleBounds, glm::mat4(1.0f),
+            glm::mat4(1.0f), glm::vec3(0.0f), animationSettings);
+    const danvulkan::AnimationPlayer::InstanceUpdatePolicy farPolicy =
+        SceneContext::planActorAnimationUpdate(farBounds, glm::mat4(1.0f),
+            glm::mat4(1.0f), glm::vec3(0.0f), animationSettings);
+    const danvulkan::AnimationPlayer::InstanceUpdatePolicy culledPolicy =
+        SceneContext::planActorAnimationUpdate(culledBounds, glm::mat4(1.0f),
+            glm::mat4(1.0f), glm::vec3(0.0f), animationSettings);
+    require(nearPolicy.evaluate && nearPolicy.minimumEvaluationIntervalSeconds == 0.0f &&
+        middlePolicy.evaluate && middlePolicy.minimumEvaluationIntervalSeconds > 0.03f &&
+        farPolicy.evaluate && farPolicy.minimumEvaluationIntervalSeconds > 0.06f &&
+        !culledPolicy.evaluate,
+        "actor animation planning did not select full, medium, far, and culled policies");
+
     const danvulkan::assets::Bounds translated = SceneContext::transformedBounds(nearBounds,
         glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 3.0f, 4.0f)));
     require(translated.minVertex.x > 1.8f && translated.minVertex.y > 2.8f &&

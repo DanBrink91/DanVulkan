@@ -93,13 +93,21 @@ struct TransformData
 using Vertex = assets::Vertex;
 static_assert(sizeof(Vertex) == 112, "CPU vertex layout must match shaders/vert.vert");
 
-struct SkinnedDrawState
+struct SkinPaletteState
 {
-    assets::NodeHandle node;
+    static constexpr std::uint32_t noAnimationInstance =
+        std::numeric_limits<std::uint32_t>::max();
     assets::SkinHandle skin;
-    std::uint32_t transformIndex = 0;
     std::uint32_t jointOffset = 0;
-    std::uint32_t meshDataIndex = 0;
+    std::uint32_t jointCount = 0;
+    std::uint32_t animationInstance = noAnimationInstance;
+};
+
+struct AnimationSynchronizationTimings
+{
+    double transformUpdateMilliseconds = 0.0;
+    double boundsMilliseconds = 0.0;
+    double paletteGenerationMilliseconds = 0.0;
 };
 
 struct AnimatedDrawState
@@ -107,6 +115,29 @@ struct AnimatedDrawState
     assets::NodeHandle node;
     std::uint32_t transformIndex = 0;
     std::uint32_t meshDataIndex = 0;
+    std::uint32_t animationInstance = 0;
+};
+
+struct AnimationActorState
+{
+    assets::Bounds conservativeBounds{};
+    bool hasBounds = false;
+};
+
+struct AnimationUpdateSettings
+{
+    bool cullOffscreenActors = true;
+    float fullRateDistance = 15.0f;
+    float reducedRateDistance = 35.0f;
+    float mediumUpdatesPerSecond = 30.0f;
+    float farUpdatesPerSecond = 15.0f;
+};
+
+struct AnimationUpdateCounts
+{
+    std::uint32_t actors = 0;
+    std::uint32_t eligible = 0;
+    std::uint32_t culled = 0;
 };
 
 struct Texture
@@ -147,7 +178,8 @@ struct PreparedSceneData
     std::vector<assets::Bounds> bounds;
     std::optional<AnimationPlayer> animationPlayer;
     std::vector<AnimatedDrawState> animatedDraws;
-    std::vector<SkinnedDrawState> skinnedDraws;
+    std::vector<SkinPaletteState> skinPalettes;
+    std::vector<AnimationActorState> animationActors;
     std::vector<glm::mat4> jointMatrices;
 };
 
@@ -172,7 +204,16 @@ class SceneContext
 {
 public:
     void reserveFrameScratch();
-    void synchronizeAnimationPose();
+    [[nodiscard]] AnimationSynchronizationTimings synchronizeAnimationPose(
+        bool changedInstancesOnly = false);
+    [[nodiscard]] AnimationUpdateCounts prepareAnimationUpdates(const glm::mat4& view,
+        const glm::mat4& projection, const glm::vec3& cameraPosition,
+        const AnimationUpdateSettings& settings);
+    [[nodiscard]] std::span<const AnimationPlayer::InstanceUpdatePolicy>
+        animationUpdatePolicies() const noexcept { return animationUpdatePolicies_; }
+    [[nodiscard]] static AnimationPlayer::InstanceUpdatePolicy planActorAnimationUpdate(
+        const assets::Bounds& bounds, const glm::mat4& view, const glm::mat4& projection,
+        const glm::vec3& cameraPosition, const AnimationUpdateSettings& settings);
     [[nodiscard]] SceneDrawCounts prepareDraws(const glm::mat4& view,
         const glm::mat4& projection, const glm::vec3& cameraPosition);
     [[nodiscard]] std::uint64_t cpuScratchBytes() const noexcept;
@@ -224,7 +265,9 @@ public:
     std::vector<assets::Bounds> aabbs;
     std::optional<AnimationPlayer> animationPlayer_;
     std::vector<AnimatedDrawState> animatedDraws_;
-    std::vector<SkinnedDrawState> skinnedDraws_;
+    std::vector<SkinPaletteState> skinPalettes_;
+    std::vector<AnimationActorState> animationActors_;
+    std::vector<AnimationPlayer::InstanceUpdatePolicy> animationUpdatePolicies_;
     std::vector<glm::mat4> jointMatrices_;
 
     std::vector<std::optional<Texture>> textures;

@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace danvulkan::vk
 {
@@ -220,6 +221,53 @@ void UploadContext::uploadImage(VkImage destination, std::uint32_t width,
         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, mipLevels - 1, 1);
 
+    submitAndWait(commandBuffer);
+    ++uploadCount_;
+}
+
+void UploadContext::uploadImageMipChain(VkImage destination,
+    std::span<const ImageUploadLevel> levels, const void* data, VkDeviceSize size,
+    std::string_view name)
+{
+    if (destination == VK_NULL_HANDLE || levels.empty() || data == nullptr || size == 0 ||
+        levels.size() > std::numeric_limits<std::uint32_t>::max())
+    {
+        throw std::invalid_argument("mip-chain upload requires a destination and pixel levels");
+    }
+    for (std::size_t index = 0; index < levels.size(); ++index)
+    {
+        const ImageUploadLevel& level = levels[index];
+        if (level.width == 0 || level.height == 0 || level.byteOffset >= size ||
+            (index > 0 && (level.width > levels[index - 1].width ||
+                level.height > levels[index - 1].height)))
+        {
+            throw std::invalid_argument("mip-chain upload contains an invalid level");
+        }
+    }
+
+    writeStaging(data, size, name);
+    VkCommandBuffer commandBuffer = beginCommands();
+    const std::uint32_t levelCount = static_cast<std::uint32_t>(levels.size());
+    transitionImage(commandBuffer, destination, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, 0, levelCount);
+
+    std::vector<VkBufferImageCopy> regions(levels.size());
+    for (std::size_t index = 0; index < levels.size(); ++index)
+    {
+        regions[index].bufferOffset = levels[index].byteOffset;
+        regions[index].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        regions[index].imageSubresource.mipLevel = static_cast<std::uint32_t>(index);
+        regions[index].imageSubresource.layerCount = 1;
+        regions[index].imageExtent = {levels[index].width, levels[index].height, 1};
+    }
+    vkCmdCopyBufferToImage(commandBuffer, staging_, destination,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(regions.size()),
+        regions.data());
+    transitionImage(commandBuffer, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, 0, levelCount);
     submitAndWait(commandBuffer);
     ++uploadCount_;
 }

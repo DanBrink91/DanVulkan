@@ -1,16 +1,59 @@
 #include "scene_context.hpp"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
 #include <limits>
 #include <ranges>
 #include <stdexcept>
 
 namespace danvulkan::vk {
+namespace {
+std::array<glm::vec4, 6> frustumPlanes(
+    const glm::mat4& view, const glm::mat4& projection)
+{
+    const glm::mat4 viewProjection = glm::transpose(projection * view);
+    std::array<glm::vec4, 6> planes{
+        viewProjection[3] + viewProjection[0], viewProjection[3] - viewProjection[0],
+        viewProjection[3] - viewProjection[1], viewProjection[3] + viewProjection[1],
+        viewProjection[3] + viewProjection[2], viewProjection[3] - viewProjection[2]
+    };
+    for (glm::vec4& plane : planes)
+    {
+        const float length = glm::length(glm::vec3(plane));
+        if (length > 0.0f)
+        {
+            plane /= length;
+        }
+    }
+    return planes;
+}
+
+bool boundsVisible(const assets::Bounds& bounds, std::span<const glm::vec4> planes)
+{
+    for (const glm::vec4& plane : planes)
+    {
+        const glm::vec3 normal = plane;
+        const glm::vec3 axisVertex{
+            normal.x < 0.0f ? bounds.minVertex.x : bounds.maxVertex.x,
+            normal.y < 0.0f ? bounds.minVertex.y : bounds.maxVertex.y,
+            normal.z < 0.0f ? bounds.minVertex.z : bounds.maxVertex.z
+        };
+        if (glm::dot(normal, axisVertex) + plane.w < 0.0f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+}
 
 void SceneContext::reserveFrameScratch()
 {
     indirectCommands.reserve(meshData.size());
     drawData.reserve(meshData.size());
+    animationUpdatePolicies_.reserve(animationActors_.size());
     std::array<std::size_t, PipelineVariantCount> variantCounts{};
     for (const MeshData& mesh : meshData)
     {
@@ -45,14 +88,22 @@ assets::Bounds SceneContext::transformedBounds(const assets::Bounds& bounds,
     return result;
 }
 
-void SceneContext::synchronizeAnimationPose()
+AnimationSynchronizationTimings SceneContext::synchronizeAnimationPose(bool changedInstancesOnly)
 {
+    AnimationSynchronizationTimings timings;
     if (!animationPlayer_)
     {
-        return;
+        return timings;
     }
+    const auto transformBegin = std::chrono::steady_clock::now();
     for (const AnimatedDrawState& state : animatedDraws_)
     {
+        if (changedInstancesOnly &&
+            (state.animationInstance == SkinPaletteState::noAnimationInstance ||
+             !animationPlayer_->instanceEvaluated(state.animationInstance)))
+        {
+            continue;
+        }
         if (state.transformIndex >= transformData.size() || state.meshDataIndex >= meshData.size() ||
             state.meshDataIndex >= aabbs.size())
         {
@@ -60,44 +111,127 @@ void SceneContext::synchronizeAnimationPose()
         }
         const glm::mat4& world = animationPlayer_->worldTransform(state.node);
         transformData[state.transformIndex].model = world;
+    }
+    timings.transformUpdateMilliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - transformBegin).count();
+    const auto boundsBegin = std::chrono::steady_clock::now();
+    for (const AnimatedDrawState& state : animatedDraws_)
+    {
+        if (changedInstancesOnly &&
+            !animationPlayer_->instanceEvaluated(state.animationInstance))
+        {
+            continue;
+        }
+        const glm::mat4& world = animationPlayer_->worldTransform(state.node);
         aabbs[state.meshDataIndex] = transformedBounds(meshData[state.meshDataIndex].localBounds,
             world);
+        AnimationActorState& actor = animationActors_.at(state.animationInstance);
+        if (!actor.hasBounds)
+        {
+            actor.conservativeBounds = aabbs[state.meshDataIndex];
+            actor.hasBounds = true;
+        }
+        else
+        {
+            actor.conservativeBounds.minVertex = glm::min(
+                actor.conservativeBounds.minVertex, aabbs[state.meshDataIndex].minVertex);
+            actor.conservativeBounds.maxVertex = glm::max(
+                actor.conservativeBounds.maxVertex, aabbs[state.meshDataIndex].maxVertex);
+        }
     }
-    jointMatrices_.clear();
-    for (const SkinnedDrawState& state : skinnedDraws_)
+    timings.boundsMilliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - boundsBegin).count();
+    const auto paletteBegin = std::chrono::steady_clock::now();
+    for (const SkinPaletteState& state : skinPalettes_)
     {
-        if (jointMatrices_.size() < state.jointOffset)
+        if (changedInstancesOnly &&
+            (state.animationInstance == SkinPaletteState::noAnimationInstance ||
+             !animationPlayer_->instanceEvaluated(state.animationInstance)))
+        {
+            continue;
+        }
+        if (state.jointOffset > jointMatrices_.size() ||
+            state.jointCount > jointMatrices_.size() - state.jointOffset)
         {
             throw std::runtime_error("animated renderer state is inconsistent");
         }
-        if (jointMatrices_.size() == state.jointOffset)
-        {
-            animationPlayer_->appendSkinMatrices(state.skin, state.node, jointMatrices_);
-        }
+        animationPlayer_->writeSkinMatrices(state.skin,
+            std::span<glm::mat4>(jointMatrices_).subspan(
+                state.jointOffset, state.jointCount));
     }
     if (jointMatrices_.size() > JointMatrixCount)
     {
         throw std::runtime_error("animated scene exceeds the renderer joint matrix capacity");
     }
+    timings.paletteGenerationMilliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - paletteBegin).count();
+    return timings;
+}
+
+AnimationPlayer::InstanceUpdatePolicy SceneContext::planActorAnimationUpdate(
+    const assets::Bounds& bounds, const glm::mat4& view, const glm::mat4& projection,
+    const glm::vec3& cameraPosition, const AnimationUpdateSettings& settings)
+{
+    if (!std::isfinite(settings.fullRateDistance) || settings.fullRateDistance < 0.0f ||
+        !std::isfinite(settings.reducedRateDistance) ||
+        settings.reducedRateDistance < settings.fullRateDistance ||
+        !std::isfinite(settings.mediumUpdatesPerSecond) ||
+        settings.mediumUpdatesPerSecond <= 0.0f ||
+        !std::isfinite(settings.farUpdatesPerSecond) || settings.farUpdatesPerSecond <= 0.0f)
+    {
+        throw std::invalid_argument("animation update settings are invalid");
+    }
+    if (settings.cullOffscreenActors &&
+        !boundsVisible(bounds, frustumPlanes(view, projection)))
+    {
+        return {false, 0.0f};
+    }
+    const glm::vec3 center = (bounds.minVertex + bounds.maxVertex) * 0.5f;
+    const float distance = glm::length(center - cameraPosition);
+    if (distance <= settings.fullRateDistance)
+    {
+        return {true, 0.0f};
+    }
+    if (distance <= settings.reducedRateDistance)
+    {
+        return {true, 1.0f / settings.mediumUpdatesPerSecond};
+    }
+    return {true, 1.0f / settings.farUpdatesPerSecond};
+}
+
+AnimationUpdateCounts SceneContext::prepareAnimationUpdates(const glm::mat4& view,
+    const glm::mat4& projection, const glm::vec3& cameraPosition,
+    const AnimationUpdateSettings& settings)
+{
+    animationUpdatePolicies_.assign(animationActors_.size(), {});
+    AnimationUpdateCounts counts;
+    counts.actors = static_cast<std::uint32_t>(animationActors_.size());
+    for (std::size_t index = 0; index < animationActors_.size(); ++index)
+    {
+        const AnimationActorState& actor = animationActors_[index];
+        AnimationPlayer::InstanceUpdatePolicy policy;
+        if (actor.hasBounds)
+        {
+            policy = planActorAnimationUpdate(
+                actor.conservativeBounds, view, projection, cameraPosition, settings);
+        }
+        animationUpdatePolicies_[index] = policy;
+        if (policy.evaluate)
+        {
+            ++counts.eligible;
+        }
+        else
+        {
+            ++counts.culled;
+        }
+    }
+    return counts;
 }
 
 SceneDrawCounts SceneContext::prepareDraws(const glm::mat4& view,
     const glm::mat4& projection, const glm::vec3& cameraPosition)
 {
-    const glm::mat4 viewProjection = glm::transpose(projection * view);
-    std::array<glm::vec4, 6> planes{
-        viewProjection[3] + viewProjection[0], viewProjection[3] - viewProjection[0],
-        viewProjection[3] - viewProjection[1], viewProjection[3] + viewProjection[1],
-        viewProjection[3] + viewProjection[2], viewProjection[3] - viewProjection[2]
-    };
-    for (glm::vec4& plane : planes)
-    {
-        const float length = glm::length(glm::vec3(plane));
-        if (length > 0.0f)
-        {
-            plane /= length;
-        }
-    }
+    const std::array<glm::vec4, 6> planes = frustumPlanes(view, projection);
 
     drawData.clear();
     indirectCommands.clear();
@@ -116,22 +250,7 @@ SceneDrawCounts SceneContext::prepareDraws(const glm::mat4& view,
         {
             throw std::runtime_error("scene contains an invalid pipeline variant");
         }
-        bool culled = false;
-        for (const glm::vec4& plane : planes)
-        {
-            const glm::vec3 normal = plane;
-            const glm::vec3 axisVertex{
-                normal.x < 0.0f ? aabbs[index].minVertex.x : aabbs[index].maxVertex.x,
-                normal.y < 0.0f ? aabbs[index].minVertex.y : aabbs[index].maxVertex.y,
-                normal.z < 0.0f ? aabbs[index].minVertex.z : aabbs[index].maxVertex.z
-            };
-            if (glm::dot(normal, axisVertex) + plane.w < 0.0f)
-            {
-                culled = true;
-                break;
-            }
-        }
-        if (!culled)
+        if (boundsVisible(aabbs[index], planes))
         {
             visibleMeshScratch_[meshData[index].pipelineVariant].push_back(index);
         }
@@ -183,7 +302,9 @@ std::uint64_t SceneContext::cpuScratchBytes() const noexcept
 {
     std::uint64_t result = jointMatrices_.capacity() * sizeof(glm::mat4) +
         indirectCommands.capacity() * sizeof(VkDrawIndexedIndirectCommand) +
-        drawData.capacity() * sizeof(DrawData);
+        drawData.capacity() * sizeof(DrawData) +
+        animationActors_.capacity() * sizeof(AnimationActorState) +
+        animationUpdatePolicies_.capacity() * sizeof(AnimationPlayer::InstanceUpdatePolicy);
     for (const std::vector<std::size_t>& bucket : visibleMeshScratch_)
     {
         result += bucket.capacity() * sizeof(std::size_t);
@@ -455,7 +576,9 @@ void SceneContext::resetScene(VkDevice device) noexcept
     aabbs.clear();
     animationPlayer_.reset();
     animatedDraws_.clear();
-    skinnedDraws_.clear();
+    skinPalettes_.clear();
+    animationActors_.clear();
+    animationUpdatePolicies_.clear();
     jointMatrices_.clear();
     indirectCommands.clear();
     drawBatches.fill({});

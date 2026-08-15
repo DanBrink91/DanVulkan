@@ -56,6 +56,7 @@ Applications include `<danvulkan/renderer.hpp>`, create a `RendererConfig`, and 
 VulkanRenderer renderer(config);
 renderer.initialize();
 const SceneInstanceHandle player = renderer.sceneInstances().front().handle;
+SceneSubmission scene;
 while (!renderer.shouldClose())
 {
     // Resource changes happen between frames.
@@ -63,18 +64,20 @@ while (!renderer.shouldClose())
     if (!renderer.beginFrame())
         break;
 
-    SceneSubmission scene;
     scene.view = gameCamera.view();
     scene.projection = gameCamera.projection();
     scene.cameraPosition = gameCamera.position();
-    scene.lightPosition = gameLight.position();
+    scene.pointLights.front().position = gameLight.position();
+    scene.pointLights.front().color = gameLight.color();
+    scene.pointLights.front().intensity = gameLight.intensity();
+    scene.environment.intensity = 0.05f;
     renderer.submitScene(scene);
     renderer.endFrame();
 }
 renderer.shutdown();
 ```
 
-The renderer loads the scene named by `RendererConfig::modelPath` during initialization. `SceneSubmission` supplies per-frame view and lighting state. `sceneMeshes()`, `sceneInstances()`, and `sceneMaterials()` expose generation-tagged handles plus their current values. Between frames, games can create and remove PBR materials, upload and remove meshes, create and remove instances, and update world transforms or material factors. Destroyed material, mesh, and instance slots are reusable, but their generations advance so stale handles are rejected.
+The renderer loads the scene named by `RendererConfig::modelPath` during initialization. `SceneSubmission` supplies per-frame view, point-light, and environment controls. Additional `ScenePointLight` values can be appended independently, up to `RendererConfig::maxPointLights`. `sceneMeshes()`, `sceneInstances()`, and `sceneMaterials()` expose generation-tagged handles plus their current values. Between frames, games can create and remove PBR materials, upload and remove meshes, create and remove instances, and update world transforms or material factors. Destroyed material, mesh, and instance slots are reusable, but their generations advance so stale handles are rejected.
 
 Internally, physical-device probing and logical-device ownership live in a focused device context. Selection requires Vulkan 1.4, every renderer feature, complete graphics/presentation queues, and adequate swapchain support; suitable candidates are scored deterministically rather than accepted in driver enumeration order. Queue-family selection and candidate scoring are Vulkan-free planning functions with dedicated CPU tests.
 
@@ -85,6 +88,8 @@ Descriptor policy and ownership are similarly isolated. Pure planning clamps bin
 Graphics-pipeline policy and ownership live in a transactional pipeline context. Pure planning defines the culling, blending, and depth-write state for all six material variants. Shader modules, the pipeline layout, and pipeline handles are replaced as one complete set, and extent-only swapchain recreation retains compatible pipelines. Per-frame command pools, command buffers, acquire semaphores, fences, and timestamp queries are likewise owned by frame contexts; completed-frame timestamps are collected after their fence wait without serializing every submitted frame.
 
 Uploaded-scene ownership is isolated in a scene context. It holds scene metadata and handles, geometry and textures, per-swapchain scene buffers, free ranges, generation-gated retirement queues, and reusable animation/culling/indirect scratch. It also synchronizes animated poses, transforms bounds, culls and orders visible draws, and builds per-pipeline indirect batches. The top-level renderer now coordinates these focused owners and records frames without owning scene storage directly.
+
+Lighting ownership is isolated in a lighting context. It holds renderer-owned RGBA32F irradiance, GGX-prefiltered specular, and split-sum BRDF images plus persistently mapped point-light storage for each swapchain image. `RendererConfig::environmentMap` accepts an optional decoded RGBA8 or linear RGBA32F equirectangular environment without exposing Vulkan; `assets::loadEnvironment("sky.hdr")` preserves HDR values, while omitting the map selects a small neutral fallback. A Vulkan-free startup stage builds the three IBL inputs, and the shader combines them with bounded multi-light Cook-Torrance direct lighting. Directional/spot lights and shadows remain future refinements.
 
 `RendererConfig::additionalScenes` composes more glTF/GLB assets above the primary scene with a caller-supplied root transform. The demo uses it to place `ninja_run_free_fire_emote.glb` at village scale and automatically loops that file's first animation. Skinned vertices retain four joint indices and normalized weights; a CPU animation player evaluates linear or step translation, rotation, and scale channels, propagates the node hierarchy, and writes a per-frame joint palette consumed by the vertex shader. This temporary character proves the animation path while `naruto.glb` remains static and cannot yet receive the clip without being rigged.
 
@@ -103,7 +108,19 @@ renderer.resumeAnimation();
 const AnimationPlaybackState playback = renderer.animationPlaybackState();
 ```
 
-`stopAnimation()` rewinds to the selected clip's first pose, while a non-looping clip reports `AnimationPlaybackStatus::finished` at its final pose. `playAnimation(handle, false)` preserves the cursor of an already-selected active or paused clip; selecting a different clip or replaying a stopped or finished clip starts from its beginning. Scene replacement invalidates old animation handles just like other scene-owned handles. The active scene currently has one global playback cursor, so independent playback for multiple animated actors and clip blending remain future work.
+`stopAnimation()` rewinds to the selected clip's authored starting poses, while a non-looping clip reports `AnimationPlaybackStatus::finished` at its final pose. `playAnimation(handle, false)` preserves the cursors of already-selected active or paused instances; selecting a different clip or replaying stopped or finished instances restores their authored phase offsets. Scene replacement invalidates old animation handles just like other scene-owned handles. `AnimationInstanceAsset` can map one immutable clip onto independent actor hierarchies with separate position, speed, looping, and status state. Clip blending remains future work.
+
+Animation clips compile into packed channels and values, shared timelines, precomputed interval reciprocals, and per-instance advancing cursors. `RendererConfig::animation` controls actor-level pose culling plus full-, medium-, and far-rate distance tiers. Culled or rate-limited actors retain their last pose and palette while their playback clocks continue advancing, and an actor evaluates immediately when it becomes visible again.
+
+Compiled clips fold exactly constant tracks out of steady evaluation and split translation, scale,
+and rotation tracks by interpolation mode. Steady updates overwrite animated components directly;
+base poses are restored only for initialization and playback operations such as changing clips or
+stopping. `RendererConfig::animation.adaptiveNlerpMaxAngleRadians` optionally substitutes normalized
+linear quaternion interpolation for adjacent keys within a caller-selected angular threshold. Its
+zero default retains exact slerp. Hierarchies also compile into one packed parent-before-child
+propagation plan, with allocation-free per-instance subtree ranges. Pose-driven nodes compose TRS
+directly into parent space, while static TRS and affine matrix locals reuse a cached matrix;
+arbitrary matrix-authored locals retain the general multiplication path.
 
 The convenience demo captures the mouse for first-person look, uses WASD for movement, and closes with Escape. Its initial camera position, clip planes, and movement speed are derived from the loaded scene bounds, so changing the configured model does not require another hard-coded camera pose.
 
@@ -114,10 +131,16 @@ Leaving `RendererConfig::platform` null selects the convenient renderer-owned GL
 A Vulkan-free scene planner now validates resource references, graph ownership, animation data,
 capacities, skin indices, and decoded textures while packing geometry and flattening hierarchy draws.
 Startup and transactional replacement consume the same plan, including animated replacements.
-`RendererPerformanceStats` exposes rolling frame, GPU, animation evaluation/synchronization,
-culling, mapped-buffer-write, and command-recording measurements. Run
-`DanVulkan --animated-stress-test` to exercise 24 independently placed characters sharing one
-uploaded character resource set, with every animation channel active in an aggregate clip.
+`RendererPerformanceStats` exposes separate rolling end-to-end frame wall time, render-thread CPU
+time, GPU time, detailed animation stage and actor-policy, culling, mapped-buffer-write, and
+command-recording measurements, including propagated, pose-composed, and cached-local node counts.
+Frame wall time includes synchronization and presentation pacing; render-thread CPU time excludes
+blocked and descheduled time. Run
+`DanVulkan --animated-stress-test` to exercise 100 independently phased characters sharing one
+uploaded character resource set and immutable 152-channel clip. The stress run uses 120 warm-up
+frames followed by 480 measured frames, then reports means and selected variability across the
+post-warm-up rolling timing snapshots. `--animated-stress-test-nlerp` runs the same workload with
+the separately measured 20-degree adaptive-nlerp policy.
 
 `RendererConfig::memory.maxMsaaSamples` caps multisampling with a Vulkan-free numeric policy;
 zero selects the device maximum and one disables MSAA. Transient MSAA color and depth targets are

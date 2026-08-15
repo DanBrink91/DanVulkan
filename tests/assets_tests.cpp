@@ -55,6 +55,18 @@ int main()
                                            albedo->height * 4U,
                 "decoded texture byte count is invalid");
 
+        const danvulkan::assets::TextureAsset environment =
+            danvulkan::assets::loadEnvironment("textures/texture.jpg");
+        require(environment.width > 0 && environment.height > 0 &&
+            environment.colorSpace == danvulkan::assets::ColorSpace::linear &&
+            environment.rgba8.empty() &&
+            environment.rgba32f.size() == static_cast<std::size_t>(environment.width) *
+                environment.height * 4U,
+            "environment decoder did not produce a linear RGBA32F payload");
+        require(environment.sampler.wrapU == danvulkan::assets::TextureWrap::repeat &&
+            environment.sampler.wrapV == danvulkan::assets::TextureWrap::clampToEdge,
+            "environment decoder did not select equirectangular wrapping");
+
         const danvulkan::assets::SceneAsset gltf =
             danvulkan::assets::loadScene("models/triangle.gltf");
         require(gltf.textures().size() == 2, "expected fallback and glTF base-color textures");

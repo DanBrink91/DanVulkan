@@ -11,10 +11,26 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
     mat4 view;
     mat4 projection;
     vec4 cameraPositionTime;
-    vec4 lightPosition;
+    uvec4 lightingCounts;
+    vec4 environmentTintIntensity;
+    vec4 environmentControls;
 } ubo;
 
 layout(set = 0, binding = 5) uniform sampler2D textures[];
+layout(set = 0, binding = 8) uniform sampler2D irradianceMap;
+layout(set = 0, binding = 9) uniform sampler2D prefilteredSpecularMap;
+layout(set = 0, binding = 10) uniform sampler2D environmentBrdfMap;
+
+struct PointLightData
+{
+    vec4 positionRange;
+    vec4 colorIntensity;
+};
+
+layout(set = 0, binding = 7) readonly buffer PointLights
+{
+    PointLightData pointLights[];
+};
 
 struct MaterialData
 {
@@ -64,6 +80,23 @@ float geometrySmith(vec3 normal, vec3 viewDirection, vec3 lightDirection, float 
 vec3 fresnelSchlick(float cosTheta, vec3 reflectance)
 {
     return reflectance + (1.0 - reflectance) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 reflectance, float roughness)
+{
+    return reflectance + (max(vec3(1.0 - roughness), reflectance) - reflectance) *
+        pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec2 environmentUv(vec3 direction)
+{
+    direction = normalize(direction);
+    float rotation = ubo.environmentControls.x;
+    float sine = sin(rotation);
+    float cosine = cos(rotation);
+    direction.xz = mat2(cosine, -sine, sine, cosine) * direction.xz;
+    return vec2(atan(direction.z, direction.x) / (2.0 * Pi) + 0.5,
+        acos(clamp(direction.y, -1.0, 1.0)) / Pi);
 }
 
 vec3 materialNormal(MaterialData material, vec2 uv)
@@ -136,24 +169,50 @@ void main()
 
     vec3 normal = materialNormal(material, uv);
     vec3 viewDirection = normalize(ubo.cameraPositionTime.xyz - inWorldPosition);
-    vec3 lightOffset = ubo.lightPosition.xyz - inWorldPosition;
-    float lightDistanceSquared = max(dot(lightOffset, lightOffset), 0.01);
-    vec3 lightDirection = normalize(lightOffset);
-    vec3 halfway = normalize(viewDirection + lightDirection);
-
     vec3 reflectance = mix(vec3(0.04), baseColor.rgb, metallic);
-    vec3 fresnel = fresnelSchlick(max(dot(halfway, viewDirection), 0.0), reflectance);
-    float distribution = distributionGgx(normal, halfway, roughness);
-    float geometry = geometrySmith(normal, viewDirection, lightDirection, roughness);
-    vec3 specular = distribution * geometry * fresnel /
-        max(4.0 * max(dot(normal, viewDirection), 0.0) *
-            max(dot(normal, lightDirection), 0.0), 0.0001);
+    float nDotV = max(dot(normal, viewDirection), 0.0);
+    vec3 direct = vec3(0.0);
+    for (uint lightIndex = 0; lightIndex < ubo.lightingCounts.x; ++lightIndex)
+    {
+        PointLightData light = pointLights[lightIndex];
+        vec3 lightOffset = light.positionRange.xyz - inWorldPosition;
+        float lightDistanceSquared = max(dot(lightOffset, lightOffset), 0.01);
+        float lightDistance = sqrt(lightDistanceSquared);
+        vec3 lightDirection = lightOffset / lightDistance;
+        vec3 halfway = normalize(viewDirection + lightDirection);
+        vec3 fresnel = fresnelSchlick(max(dot(halfway, viewDirection), 0.0), reflectance);
+        float distribution = distributionGgx(normal, halfway, roughness);
+        float geometry = geometrySmith(normal, viewDirection, lightDirection, roughness);
+        vec3 specular = distribution * geometry * fresnel /
+            max(4.0 * nDotV * max(dot(normal, lightDirection), 0.0), 0.0001);
+        vec3 diffuseWeight = (1.0 - fresnel) * (1.0 - metallic);
+        float rangeWeight = 1.0;
+        if (light.positionRange.w > 0.0)
+        {
+            float normalizedDistance = lightDistance / light.positionRange.w;
+            rangeWeight = pow(clamp(1.0 - pow(normalizedDistance, 4.0), 0.0, 1.0), 2.0);
+        }
+        vec3 radiance = light.colorIntensity.rgb * light.colorIntensity.w *
+            rangeWeight / lightDistanceSquared;
+        float nDotL = max(dot(normal, lightDirection), 0.0);
+        direct += (diffuseWeight * baseColor.rgb / Pi + specular) * radiance * nDotL;
+    }
 
-    vec3 diffuseWeight = (1.0 - fresnel) * (1.0 - metallic);
-    vec3 radiance = vec3(25.0) / lightDistanceSquared;
-    float nDotL = max(dot(normal, lightDirection), 0.0);
-    vec3 direct = (diffuseWeight * baseColor.rgb / Pi + specular) * radiance * nDotL;
-    vec3 ambient = vec3(0.03) * baseColor.rgb * occlusion;
+    float maximumEnvironmentLod =
+        float(max(textureQueryLevels(prefilteredSpecularMap) - 1, 0));
+    vec3 environmentFresnel = fresnelSchlickRoughness(nDotV, reflectance, roughness);
+    vec3 environmentDiffuse = textureLod(irradianceMap, environmentUv(normal), 0.0).rgb;
+    vec3 reflection = reflect(-viewDirection, normal);
+    vec3 environmentSpecular = textureLod(prefilteredSpecularMap,
+        environmentUv(reflection), roughness * maximumEnvironmentLod).rgb;
+    vec2 environmentBrdf = texture(environmentBrdfMap, vec2(nDotV, roughness)).rg;
+    vec3 diffuseEnvironment = (1.0 - environmentFresnel) * (1.0 - metallic) *
+        baseColor.rgb * environmentDiffuse / Pi * ubo.environmentControls.y;
+    vec3 specularEnvironment = environmentSpecular *
+        (environmentFresnel * environmentBrdf.x + environmentBrdf.y) *
+        ubo.environmentControls.z;
+    vec3 ambient = (diffuseEnvironment + specularEnvironment) *
+        ubo.environmentTintIntensity.rgb * ubo.environmentTintIntensity.w * occlusion;
     vec3 color = ambient + direct + emissive;
     color = color / (color + vec3(1.0));
 

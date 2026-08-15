@@ -25,6 +25,7 @@ struct DescriptorSetBindings
     BufferDescriptor transform;
     BufferDescriptor vertex;
     BufferDescriptor joints;
+    BufferDescriptor pointLights;
 };
 
 class DescriptorContext
@@ -40,7 +41,8 @@ public:
 
     void initialize(VkDevice device, std::uint32_t textureCapacity, bool enableDebugNames);
     void allocateSets(std::span<const DescriptorSetBindings> bindings,
-        std::span<const VkDescriptorImageInfo> textures);
+        std::span<const VkDescriptorImageInfo> textures,
+        std::span<const VkDescriptorImageInfo> environment);
     void updateVertex(std::size_t setIndex, BufferDescriptor vertex);
     void updateTextures(std::size_t setIndex,
         std::span<const VkDescriptorImageInfo> textures);
@@ -56,7 +58,8 @@ public:
 private:
     static void validateBuffer(BufferDescriptor buffer, const char* role);
     void writeSet(VkDescriptorSet set, const DescriptorSetBindings& bindings,
-        std::span<const VkDescriptorImageInfo> textures) const;
+        std::span<const VkDescriptorImageInfo> textures,
+        std::span<const VkDescriptorImageInfo> environment) const;
 
     VkDevice device_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout layout_ = VK_NULL_HANDLE;

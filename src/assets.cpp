@@ -127,6 +127,46 @@ TextureAsset decodeTexture(const std::filesystem::path& path, ColorSpace colorSp
     return texture;
 }
 
+TextureAsset decodeEnvironmentImpl(const std::filesystem::path& path)
+{
+    int width = 0;
+    int height = 0;
+    int sourceChannels = 0;
+    float* pixels = stbi_loadf(path.string().c_str(), &width, &height, &sourceChannels,
+        STBI_rgb_alpha);
+    if (pixels == nullptr)
+    {
+        const char* reason = stbi_failure_reason();
+        throw std::runtime_error("failed to decode environment '" + path.string() + "': " +
+            (reason != nullptr ? reason : "unknown stb_image error"));
+    }
+    if (width <= 0 || height <= 0)
+    {
+        stbi_image_free(pixels);
+        throw std::runtime_error("decoded environment has invalid dimensions: " + path.string());
+    }
+
+    TextureAsset texture;
+    texture.name = path.filename().string();
+    texture.sourcePath = path;
+    texture.width = static_cast<std::uint32_t>(width);
+    texture.height = static_cast<std::uint32_t>(height);
+    texture.colorSpace = ColorSpace::linear;
+    texture.sampler.wrapU = TextureWrap::repeat;
+    texture.sampler.wrapV = TextureWrap::clampToEdge;
+    if (static_cast<std::size_t>(height) > std::numeric_limits<std::size_t>::max() /
+        static_cast<std::size_t>(width) / 4U)
+    {
+        stbi_image_free(pixels);
+        throw std::runtime_error("decoded environment dimensions overflow: " + path.string());
+    }
+    const std::size_t valueCount = static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height) * 4U;
+    texture.rgba32f.assign(pixels, pixels + valueCount);
+    stbi_image_free(pixels);
+    return texture;
+}
+
 TextureAsset makeWhiteTextureImpl()
 {
     TextureAsset texture;
@@ -325,6 +365,11 @@ void finishGeometry(MeshAsset& mesh, bool generateNormals)
 }
 }
 
+TextureAsset loadEnvironment(const std::filesystem::path& path)
+{
+    return decodeEnvironmentImpl(path);
+}
+
 TextureHandle SceneAsset::addTexture(TextureAsset texture)
 {
     const TextureHandle handle{ static_cast<std::uint32_t>(textures_.size()), initialGeneration };
@@ -375,6 +420,23 @@ AnimationHandle SceneAsset::addAnimation(AnimationClipAsset animation)
     return handle;
 }
 
+void SceneAsset::addAnimationInstance(AnimationInstanceAsset instance)
+{
+    if (find(instance.clip) == nullptr)
+    {
+        throw std::invalid_argument("cannot add an animation instance with an invalid clip");
+    }
+    for (const AnimationNodeBindingAsset& binding : instance.nodeBindings)
+    {
+        if (find(binding.source) == nullptr || find(binding.target) == nullptr)
+        {
+            throw std::invalid_argument(
+                "cannot add an animation instance with an invalid node binding");
+        }
+    }
+    animationInstances_.push_back(std::move(instance));
+}
+
 void SceneAsset::addRootNode(NodeHandle node)
 {
     if (find(node) == nullptr)
@@ -391,6 +453,7 @@ std::vector<NodeHandle> SceneAsset::append(SceneAsset scene, const glm::mat4& ro
     const std::uint32_t meshOffset = static_cast<std::uint32_t>(meshes_.size());
     const std::uint32_t nodeOffset = static_cast<std::uint32_t>(nodes_.size());
     const std::uint32_t skinOffset = static_cast<std::uint32_t>(skins_.size());
+    const std::uint32_t animationOffset = static_cast<std::uint32_t>(animations_.size());
 
     const auto remap = [](auto handle, std::uint32_t offset)
     {
@@ -471,6 +534,17 @@ std::vector<NodeHandle> SceneAsset::append(SceneAsset scene, const glm::mat4& ro
             child = remap(child, nodeOffset);
         }
         addNode(std::move(node));
+    }
+
+    for (AnimationInstanceAsset& instance : scene.animationInstances_)
+    {
+        instance.clip = remap(instance.clip, animationOffset);
+        for (AnimationNodeBindingAsset& binding : instance.nodeBindings)
+        {
+            binding.source = remap(binding.source, nodeOffset);
+            binding.target = remap(binding.target, nodeOffset);
+        }
+        addAnimationInstance(std::move(instance));
     }
 
     std::vector<NodeHandle> appendedRoots;

@@ -1,4 +1,12 @@
 #define _CRT_SECURE_NO_WARNINGS
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif
 
 #include <danvulkan/renderer.hpp>
 #include <danvulkan/assets.hpp>
@@ -10,6 +18,8 @@
 #include "descriptor_planner.hpp"
 #include "device_context.hpp"
 #include "frame_context.hpp"
+#include "lighting_context.hpp"
+#include "lighting_planner.hpp"
 #include "memory_planner.hpp"
 #include "pipeline_context.hpp"
 #include "pipeline_planner.hpp"
@@ -35,6 +45,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <stdexcept>
 #include <functional>
 #include <cstdlib>
@@ -51,6 +62,12 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 
 #include <filesystem> // hot reloading
 
@@ -72,7 +89,6 @@ using danvulkan::vk::PreparedSceneData;
 using danvulkan::vk::RetiredGeometry;
 using danvulkan::vk::RetiredGeometryRanges;
 using danvulkan::vk::RetiredTexture;
-using danvulkan::vk::SkinnedDrawState;
 using danvulkan::vk::Texture;
 using danvulkan::vk::TransformData;
 using danvulkan::vk::TransformDataCount;
@@ -82,10 +98,12 @@ struct UniformBufferObject {
     glm::mat4 view;
     glm::mat4 projection;
     glm::vec4 cameraPositionTime;
-    glm::vec4 lightPosition;
+    glm::uvec4 lightingCounts;
+    glm::vec4 environmentTintIntensity;
+    glm::vec4 environmentControls;
 };
 
-static_assert(sizeof(UniformBufferObject) == 160,
+static_assert(sizeof(UniformBufferObject) == 192,
     "UniformBufferObject must match the shader std140 layout");
 
 using AABB = danvulkan::assets::Bounds;
@@ -94,17 +112,43 @@ using danvulkan::vk::PipelineVariant;
 using danvulkan::vk::PipelineVariantCount;
 
 
-struct PointLight
-{
-    glm::vec3 position;
-    float power;
-    glm::vec3 color;
-    float unused0;
-};
-
 static void checkVk(VkResult result, std::string_view operation)
 {
     danvulkan::vk::check(result, operation);
+}
+
+// steady_clock measures frame latency, while this clock measures only CPU time consumed by the
+// calling thread. Fence, swapchain-acquire, presentation, and scheduler waits do not advance it.
+// Vulkan driver work performed by other threads is intentionally outside this measurement.
+[[nodiscard]] static std::optional<double> currentThreadCpuMilliseconds() noexcept
+{
+#if defined(_WIN32)
+    FILETIME creation{};
+    FILETIME exit{};
+    FILETIME kernel{};
+    FILETIME user{};
+    if (GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user) == 0)
+    {
+        return std::nullopt;
+    }
+    ULARGE_INTEGER kernelTicks{};
+    kernelTicks.LowPart = kernel.dwLowDateTime;
+    kernelTicks.HighPart = kernel.dwHighDateTime;
+    ULARGE_INTEGER userTicks{};
+    userTicks.LowPart = user.dwLowDateTime;
+    userTicks.HighPart = user.dwHighDateTime;
+    constexpr double millisecondsPerHundredNanoseconds = 1.0e-4;
+    return static_cast<double>(kernelTicks.QuadPart + userTicks.QuadPart) *
+        millisecondsPerHundredNanoseconds;
+#else
+    timespec timestamp{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &timestamp) != 0)
+    {
+        return std::nullopt;
+    }
+    return static_cast<double>(timestamp.tv_sec) * 1000.0 +
+        static_cast<double>(timestamp.tv_nsec) * 1.0e-6;
+#endif
 }
 
 class VulkanRenderer::Impl {
@@ -117,6 +161,22 @@ public:
         if (!std::isfinite(config_.textureMipLodBias))
         {
             throw std::invalid_argument("texture mip LOD bias must be finite");
+        }
+        if (!std::isfinite(config_.animation.fullRateDistance) ||
+            config_.animation.fullRateDistance < 0.0f ||
+            !std::isfinite(config_.animation.reducedRateDistance) ||
+            config_.animation.reducedRateDistance < config_.animation.fullRateDistance ||
+            !std::isfinite(config_.animation.mediumUpdatesPerSecond) ||
+            config_.animation.mediumUpdatesPerSecond <= 0.0f ||
+            !std::isfinite(config_.animation.farUpdatesPerSecond) ||
+            config_.animation.farUpdatesPerSecond <= 0.0f ||
+            !std::isfinite(config_.animation.conservativeBoundsPadding) ||
+            config_.animation.conservativeBoundsPadding < 0.0f ||
+            !std::isfinite(config_.animation.adaptiveNlerpMaxAngleRadians) ||
+            config_.animation.adaptiveNlerpMaxAngleRadians < 0.0f ||
+            config_.animation.adaptiveNlerpMaxAngleRadians > std::numbers::pi_v<float>)
+        {
+            throw std::invalid_argument("renderer animation policy is invalid");
         }
     }
 
@@ -184,7 +244,9 @@ public:
             }
         }
 
-        frameCpuBegin_ = std::chrono::steady_clock::now();
+        frameBegin_ = std::chrono::steady_clock::now();
+        frameThreadCpuBeginMilliseconds_ = currentThreadCpuMilliseconds();
+        frameThread_ = std::this_thread::get_id();
         platform_->pollEvents();
         if (shouldClose())
         {
@@ -192,13 +254,11 @@ public:
         }
 
         const auto animationTime = std::chrono::steady_clock::now();
-        const auto animationBegin = animationTime;
-        updateAnimation(std::min(
-            std::chrono::duration<float>(animationTime - animationPreviousTime_).count(), 0.1f));
-        animationCpuAvg_ = rollingAverage(animationCpuAvg_, millisecondsSince(animationBegin));
+        animationDeltaSeconds_ = std::min(
+            std::chrono::duration<float>(animationTime - animationPreviousTime_).count(), 0.1f);
         animationPreviousTime_ = animationTime;
 
-        pendingSubmission_.reset();
+        hasPendingSubmission_ = false;
         frameInProgress_ = true;
         return true;
     }
@@ -206,32 +266,37 @@ public:
     void submitScene(const SceneSubmission& submission)
     {
         requireFrameInProgress("submitScene");
-        if (pendingSubmission_)
+        if (hasPendingSubmission_)
         {
             throw std::logic_error("submitScene may only be called once per frame");
         }
         pendingSubmission_ = submission;
+        hasPendingSubmission_ = true;
     }
 
     void endFrame()
     {
         requireFrameInProgress("endFrame");
-        if (!pendingSubmission_)
+        if (!hasPendingSubmission_)
         {
             throw std::logic_error("endFrame requires one scene submission");
         }
 
         try
         {
-            drawFrame(*pendingSubmission_);
+            const auto animationBegin = std::chrono::steady_clock::now();
+            updateAnimation(animationDeltaSeconds_, pendingSubmission_);
+            animationCpuAvg_ = rollingAverage(
+                animationCpuAvg_, millisecondsSince(animationBegin));
+            drawFrame(pendingSubmission_);
             updateWindowTitle();
             ++renderedFrames_;
-            pendingSubmission_.reset();
+            hasPendingSubmission_ = false;
             frameInProgress_ = false;
         }
         catch (...)
         {
-            pendingSubmission_.reset();
+            hasPendingSubmission_ = false;
             frameInProgress_ = false;
             throw;
         }
@@ -364,10 +429,22 @@ public:
 
     [[nodiscard]] RendererPerformanceStats performanceStats() const noexcept
     {
-        return {renderedFrames_, frameCpuAvg, frameGpuAvg, animationCpuAvg_,
-            animationEvaluationCpuAvg_, animationSynchronizationCpuAvg_, cullingCpuAvg_,
+        return {renderedFrames_, frameAvg_, frameCpuAvg_, frameGpuAvg, animationCpuAvg_,
+            animationEvaluationCpuAvg_, animationSynchronizationCpuAvg_,
+            animationSamplingCpuAvg_, animationPoseResetCpuAvg_,
+            animationTimelineResolutionCpuAvg_, animationVectorSamplingCpuAvg_,
+            animationRotationSamplingCpuAvg_, animationTransformPropagationCpuAvg_,
+            animationTransformUpdateCpuAvg_, animationBoundsCpuAvg_,
+            animationPaletteGenerationCpuAvg_, animationPaletteUploadCpuAvg_, cullingCpuAvg_,
             bufferWriteCpuAvg_, commandRecordingCpuAvg_, lastActiveDrawCount_,
-            lastVisibleDrawCount_, lastAnimatedDrawCount_, lastJointMatrixCount_};
+            lastVisibleDrawCount_, lastAnimatedDrawCount_, lastJointMatrixCount_,
+            lastPointLightCount_, lastAnimationActorCount_,
+            lastEvaluatedAnimationActorCount_, lastCulledAnimationActorCount_,
+            lastSampledAnimationChannelCount_, lastSampledAnimationVectorChannelCount_,
+            lastSampledAnimationRotationChannelCount_, lastNlerpAnimationRotationChannelCount_,
+            lastAnimationClipChannelCount_, lastFoldedConstantAnimationChannelCount_,
+            lastAnimationPropagatedNodeCount_, lastAnimationPoseComposedNodeCount_,
+            lastAnimationCachedLocalNodeCount_};
     }
 
     [[nodiscard]] RendererMemoryStats memoryStats() const noexcept
@@ -423,7 +500,7 @@ public:
         requireSceneUpdateAllowed("playAnimation");
         requireValidAnimation(animation, "playAnimation");
         scene_.animationPlayer_->play(animation.slot, restart);
-        scene_.synchronizeAnimationPose();
+        static_cast<void>(scene_.synchronizeAnimationPose());
         animationPreviousTime_ = std::chrono::steady_clock::now();
     }
 
@@ -444,14 +521,14 @@ public:
     {
         requireSceneUpdateAllowed("stopAnimation");
         requireAnimationPlayer("stopAnimation").stop();
-        scene_.synchronizeAnimationPose();
+        static_cast<void>(scene_.synchronizeAnimationPose());
     }
 
     void seekAnimation(float positionSeconds)
     {
         requireSceneUpdateAllowed("seekAnimation");
         requireAnimationPlayer("seekAnimation").seek(positionSeconds);
-        scene_.synchronizeAnimationPose();
+        static_cast<void>(scene_.synchronizeAnimationPose());
         animationPreviousTime_ = std::chrono::steady_clock::now();
     }
 
@@ -576,7 +653,8 @@ public:
         scene_.animationPlayer_.reset();
         scene_.animationPlayer_ = std::move(replacement.animationPlayer);
         scene_.animatedDraws_ = std::move(replacement.animatedDraws);
-        scene_.skinnedDraws_ = std::move(replacement.skinnedDraws);
+        scene_.skinPalettes_ = std::move(replacement.skinPalettes);
+        scene_.animationActors_ = std::move(replacement.animationActors);
         scene_.jointMatrices_ = std::move(replacement.jointMatrices);
         scene_.reserveFrameScratch();
         captureMemoryPeak();
@@ -1090,9 +1168,15 @@ private:
     bool shutdown_ = false;
     bool frameInProgress_ = false;
     std::uint64_t renderedFrames_ = 0;
-    std::chrono::steady_clock::time_point frameCpuBegin_{};
+    std::chrono::steady_clock::time_point frameBegin_{};
+    std::optional<double> frameThreadCpuBeginMilliseconds_;
+    std::thread::id frameThread_{};
     std::chrono::steady_clock::time_point animationPreviousTime_{};
-    std::optional<SceneSubmission> pendingSubmission_;
+    float animationDeltaSeconds_ = 0.0f;
+    SceneSubmission pendingSubmission_;
+    SceneSubmission demoSubmission_;
+    danvulkan::LightingPlan lightingPlan_;
+    bool hasPendingSubmission_ = false;
 
     // Declared before all dependent Vulkan resources so they are destroyed last.
     danvulkan::vk::Instance instance;
@@ -1105,10 +1189,9 @@ private:
     danvulkan::vk::PresentationContext presentation;
     danvulkan::vk::DescriptorContext descriptors;
     danvulkan::vk::PipelineContext pipelines;
-    // Declared after the device and allocator so scene-owned Vulkan resources retire first.
+    // Declared after the device and allocator so scene and lighting resources retire first.
     danvulkan::vk::SceneContext scene_;
-
-    std::vector<PointLight> pointLights;
+    danvulkan::vk::LightingContext lighting_;
 
     const std::string MODEL_PATH;
     const std::string TEXTURE_PATH = "textures/viking_room.png";
@@ -1166,10 +1249,21 @@ private:
     float culmativeDelta = 0.0f;
 
     double frameGpuAvg = 0.0;
-    double frameCpuAvg = 0.0;
+    double frameAvg_ = 0.0;
+    double frameCpuAvg_ = 0.0;
     double animationCpuAvg_ = 0.0;
     double animationEvaluationCpuAvg_ = 0.0;
     double animationSynchronizationCpuAvg_ = 0.0;
+    double animationSamplingCpuAvg_ = 0.0;
+    double animationPoseResetCpuAvg_ = 0.0;
+    double animationTimelineResolutionCpuAvg_ = 0.0;
+    double animationVectorSamplingCpuAvg_ = 0.0;
+    double animationRotationSamplingCpuAvg_ = 0.0;
+    double animationTransformPropagationCpuAvg_ = 0.0;
+    double animationTransformUpdateCpuAvg_ = 0.0;
+    double animationBoundsCpuAvg_ = 0.0;
+    double animationPaletteGenerationCpuAvg_ = 0.0;
+    double animationPaletteUploadCpuAvg_ = 0.0;
     double cullingCpuAvg_ = 0.0;
     double bufferWriteCpuAvg_ = 0.0;
     double commandRecordingCpuAvg_ = 0.0;
@@ -1177,6 +1271,19 @@ private:
     std::uint32_t lastVisibleDrawCount_ = 0;
     std::uint32_t lastAnimatedDrawCount_ = 0;
     std::uint32_t lastJointMatrixCount_ = 0;
+    std::uint32_t lastPointLightCount_ = 0;
+    std::uint32_t lastAnimationActorCount_ = 0;
+    std::uint32_t lastEvaluatedAnimationActorCount_ = 0;
+    std::uint32_t lastCulledAnimationActorCount_ = 0;
+    std::uint32_t lastSampledAnimationChannelCount_ = 0;
+    std::uint32_t lastSampledAnimationVectorChannelCount_ = 0;
+    std::uint32_t lastSampledAnimationRotationChannelCount_ = 0;
+    std::uint32_t lastNlerpAnimationRotationChannelCount_ = 0;
+    std::uint32_t lastAnimationClipChannelCount_ = 0;
+    std::uint32_t lastFoldedConstantAnimationChannelCount_ = 0;
+    std::uint32_t lastAnimationPropagatedNodeCount_ = 0;
+    std::uint32_t lastAnimationPoseComposedNodeCount_ = 0;
+    std::uint32_t lastAnimationCachedLocalNodeCount_ = 0;
 
     [[nodiscard]] static double millisecondsSince(
         std::chrono::steady_clock::time_point begin) noexcept
@@ -1231,6 +1338,11 @@ private:
         createFrameContexts();
         createUploadContext();
         loadModel();
+        lighting_.initialize(device, allocator, uploadContext_,
+            config_.environmentMap ? &*config_.environmentMap : nullptr,
+            config_.maxPointLights, swapchain.imageCount(),
+            enableValidationLayers);
+        lightingPlan_.pointLights.reserve(config_.maxPointLights);
         createDescriptorSetLayout();
         createGraphicsPipeline();
         createSwapchainAttachments();
@@ -1244,6 +1356,9 @@ private:
         //createIMGUI();
         initGame();
         captureMemoryPeak();
+        // The decoded environment payload is only preparation data; LightingContext now owns
+        // the uploaded image, view, sampler, and mip chain.
+        config_.environmentMap.reset();
     }
 
     bool recreateSwapChain()
@@ -1470,24 +1585,34 @@ private:
 
     void updateWindowTitle()
     {
-        const double frameCpuMilliseconds = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - frameCpuBegin_).count();
-        frameCpuAvg = frameCpuAvg * 0.95 + frameCpuMilliseconds * 0.05;
-        const double currentFps = frameCpuAvg > 0.0 ? 1000.0 / frameCpuAvg : 0.0;
+        const double frameMilliseconds = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - frameBegin_).count();
+        double frameCpuMilliseconds = frameMilliseconds;
+        if (frameThread_ == std::this_thread::get_id() &&
+            frameThreadCpuBeginMilliseconds_)
+        {
+            if (const std::optional<double> currentCpu = currentThreadCpuMilliseconds())
+            {
+                frameCpuMilliseconds = std::clamp(
+                    *currentCpu - *frameThreadCpuBeginMilliseconds_, 0.0, frameMilliseconds);
+            }
+        }
+        frameAvg_ = frameAvg_ * 0.95 + frameMilliseconds * 0.05;
+        frameCpuAvg_ = frameCpuAvg_ * 0.95 + frameCpuMilliseconds * 0.05;
+        const double currentFps = frameAvg_ > 0.0 ? 1000.0 / frameAvg_ : 0.0;
         char title[256];
-        sprintf(title, "DanVulkan cpu %.2f ms; gpu: %.2f ms, FPS: %.2f", frameCpuAvg,
-            frameGpuAvg, currentFps);
+        sprintf(title, "DanVulkan frame: %.2f ms; cpu: %.2f ms; gpu: %.2f ms; FPS: %.2f",
+            frameAvg_, frameCpuAvg_, frameGpuAvg, currentFps);
         platform_->setWindowTitle(title);
     }
 
-    [[nodiscard]] SceneSubmission demoSceneSubmission() const
+    [[nodiscard]] const SceneSubmission& demoSceneSubmission()
     {
-        SceneSubmission submission;
-        submission.view = camera.matrices.view;
-        submission.projection = camera.matrices.perspective;
-        submission.cameraPosition = glm::vec3(glm::inverse(camera.matrices.view)[3]);
-        submission.lightPosition = lightPos;
-        return submission;
+        demoSubmission_.view = camera.matrices.view;
+        demoSubmission_.projection = camera.matrices.perspective;
+        demoSubmission_.cameraPosition = glm::vec3(glm::inverse(camera.matrices.view)[3]);
+        demoSubmission_.pointLights.front().position = lightPos;
+        return demoSubmission_;
     }
 
     void shutdownNoThrow() noexcept
@@ -1498,7 +1623,7 @@ private:
         }
 
         frameInProgress_ = false;
-        pendingSubmission_.reset();
+        hasPendingSubmission_ = false;
         vkDeviceWaitIdle(device);
         cleanup();
         initialized_ = false;
@@ -1518,6 +1643,7 @@ private:
         pipelines.reset();
         descriptors.reset();
         uniformBuffers.clear();
+        lighting_.reset();
         scene_.resetScene(device);
         
         
@@ -2256,20 +2382,87 @@ private:
         //checkFilesChanged();
     }
 
-    void updateAnimation(float deltaSeconds)
+    void updateAnimation(float deltaSeconds, const SceneSubmission& submission)
     {
         if (!scene_.animationPlayer_)
         {
+            lastAnimationActorCount_ = 0;
+            lastEvaluatedAnimationActorCount_ = 0;
+            lastCulledAnimationActorCount_ = 0;
+            lastSampledAnimationChannelCount_ = 0;
+            lastSampledAnimationVectorChannelCount_ = 0;
+            lastSampledAnimationRotationChannelCount_ = 0;
+            lastNlerpAnimationRotationChannelCount_ = 0;
+            lastAnimationClipChannelCount_ = 0;
+            lastFoldedConstantAnimationChannelCount_ = 0;
+            lastAnimationPropagatedNodeCount_ = 0;
+            lastAnimationPoseComposedNodeCount_ = 0;
+            lastAnimationCachedLocalNodeCount_ = 0;
             return;
         }
+        glm::mat4 projection = submission.projection;
+        projection[1][1] *= -1.0f;
+        const danvulkan::vk::AnimationUpdateCounts updateCounts =
+            scene_.prepareAnimationUpdates(submission.view, projection,
+                submission.cameraPosition, {
+                    config_.animation.cullOffscreenActors,
+                    config_.animation.fullRateDistance,
+                    config_.animation.reducedRateDistance,
+                    config_.animation.mediumUpdatesPerSecond,
+                    config_.animation.farUpdatesPerSecond
+                });
+        lastAnimationActorCount_ = updateCounts.actors;
+        lastCulledAnimationActorCount_ = updateCounts.culled;
         const auto evaluationBegin = std::chrono::steady_clock::now();
-        scene_.animationPlayer_->update(deltaSeconds);
+        scene_.animationPlayer_->update(deltaSeconds, scene_.animationUpdatePolicies());
         animationEvaluationCpuAvg_ = rollingAverage(animationEvaluationCpuAvg_,
             millisecondsSince(evaluationBegin));
+        const danvulkan::AnimationPlayer::EvaluationTimings evaluation =
+            scene_.animationPlayer_->evaluationTimings();
+        lastEvaluatedAnimationActorCount_ = evaluation.evaluatedInstances;
+        animationSamplingCpuAvg_ = rollingAverage(
+            animationSamplingCpuAvg_, evaluation.samplingMilliseconds);
+        animationPoseResetCpuAvg_ = rollingAverage(
+            animationPoseResetCpuAvg_, evaluation.poseResetMilliseconds);
+        animationTimelineResolutionCpuAvg_ = rollingAverage(
+            animationTimelineResolutionCpuAvg_, evaluation.timelineResolutionMilliseconds);
+        animationVectorSamplingCpuAvg_ = rollingAverage(
+            animationVectorSamplingCpuAvg_, evaluation.vectorSamplingMilliseconds);
+        animationRotationSamplingCpuAvg_ = rollingAverage(
+            animationRotationSamplingCpuAvg_, evaluation.rotationSamplingMilliseconds);
+        animationTransformPropagationCpuAvg_ = rollingAverage(
+            animationTransformPropagationCpuAvg_, evaluation.transformPropagationMilliseconds);
+        lastSampledAnimationChannelCount_ = evaluation.sampledChannels;
+        lastSampledAnimationVectorChannelCount_ = evaluation.sampledVectorChannels;
+        lastSampledAnimationRotationChannelCount_ = evaluation.sampledRotationChannels;
+        lastNlerpAnimationRotationChannelCount_ = evaluation.nlerpRotationChannels;
+        lastAnimationPropagatedNodeCount_ = evaluation.propagatedNodes;
+        lastAnimationPoseComposedNodeCount_ = evaluation.poseComposedNodes;
+        lastAnimationCachedLocalNodeCount_ = evaluation.cachedLocalNodes;
+        const std::size_t selectedClip = scene_.animationPlayer_->currentClip();
+        if (selectedClip != danvulkan::AnimationPlayer::invalidClip)
+        {
+            lastAnimationClipChannelCount_ = static_cast<std::uint32_t>(
+                scene_.animationPlayer_->compiledChannelCount(selectedClip));
+            lastFoldedConstantAnimationChannelCount_ = static_cast<std::uint32_t>(
+                scene_.animationPlayer_->foldedConstantChannelCount(selectedClip));
+        }
+        else
+        {
+            lastAnimationClipChannelCount_ = 0;
+            lastFoldedConstantAnimationChannelCount_ = 0;
+        }
         const auto synchronizationBegin = std::chrono::steady_clock::now();
-        scene_.synchronizeAnimationPose();
+        const danvulkan::vk::AnimationSynchronizationTimings synchronization =
+            scene_.synchronizeAnimationPose(true);
         animationSynchronizationCpuAvg_ = rollingAverage(animationSynchronizationCpuAvg_,
             millisecondsSince(synchronizationBegin));
+        animationTransformUpdateCpuAvg_ = rollingAverage(
+            animationTransformUpdateCpuAvg_, synchronization.transformUpdateMilliseconds);
+        animationBoundsCpuAvg_ = rollingAverage(
+            animationBoundsCpuAvg_, synchronization.boundsMilliseconds);
+        animationPaletteGenerationCpuAvg_ = rollingAverage(animationPaletteGenerationCpuAvg_,
+            synchronization.paletteGenerationMilliseconds);
     }
 
     void rebuildSwapchainIndexedResources()
@@ -2288,6 +2481,7 @@ private:
 
         createUniformBuffers();
         createBindlessBuffers();
+        lighting_.recreateBuffers(swapchain.imageCount());
         createDescriptorSets();
     }
 #pragma endregion
@@ -2311,7 +2505,15 @@ private:
         ubo.projection = submission.projection;
         ubo.projection[1][1] *= -1.0f;
         ubo.cameraPositionTime = glm::vec4(submission.cameraPosition, 1.0f);
-        ubo.lightPosition = glm::vec4(submission.lightPosition, 1.0f);
+        if (!danvulkan::planLighting(submission.pointLights, submission.environment,
+            lighting_.pointLightCapacity(), lightingPlan_))
+        {
+            throw std::invalid_argument("scene submission contains invalid lighting");
+        }
+        ubo.lightingCounts.x = static_cast<std::uint32_t>(lightingPlan_.pointLights.size());
+        lastPointLightCount_ = ubo.lightingCounts.x;
+        ubo.environmentTintIntensity = lightingPlan_.environmentTintIntensity;
+        ubo.environmentControls = lightingPlan_.environmentControls;
         
         const auto cullingBegin = std::chrono::steady_clock::now();
         const danvulkan::vk::SceneDrawCounts drawCounts = scene_.prepareDraws(
@@ -2325,6 +2527,7 @@ private:
         // Update to GPU
         // NOTE: this is a hot area for code performance
         const auto bufferWriteBegin = std::chrono::steady_clock::now();
+        lighting_.writePointLights(currentImage, lightingPlan_.pointLights);
         // UBO
         writeBuffer(uniformBuffers[currentImage], &ubo, sizeof(ubo));
         // Transform
@@ -2333,11 +2536,14 @@ private:
         writeBuffer(scene_.matBuffers[currentImage], scene_.matData.data(), sizeof(MaterialData) * scene_.matData.size());
         // Draw Data
         writeBuffer(scene_.drawBuffers[currentImage], scene_.drawData.data(), sizeof(DrawData) * scene_.drawData.size());
+        const auto paletteUploadBegin = std::chrono::steady_clock::now();
         if (!scene_.jointMatrices_.empty())
         {
             writeBuffer(scene_.jointBuffers[currentImage], scene_.jointMatrices_.data(),
                 sizeof(glm::mat4) * scene_.jointMatrices_.size());
         }
+        animationPaletteUploadCpuAvg_ = rollingAverage(animationPaletteUploadCpuAvg_,
+            millisecondsSince(paletteUploadBegin));
         // indirect
         writeBuffer(scene_.indirectCommandsBuffer[currentImage], scene_.indirectCommands.data(),
             sizeof(VkDrawIndexedIndirectCommand) * scene_.indirectCommands.size());
@@ -2642,11 +2848,13 @@ private:
                 { scene_.transformBuffers[index], 0,
                     sizeof(TransformData) * TransformDataCount },
                 { scene_.vertexBuffer, 0, scene_.vertexBuffer.size() },
-                { scene_.jointBuffers[index], 0, sizeof(glm::mat4) * JointMatrixCount }
+                { scene_.jointBuffers[index], 0, sizeof(glm::mat4) * JointMatrixCount },
+                lighting_.lightBuffer(index)
             };
         }
         const std::vector<VkDescriptorImageInfo> textureInfos = scene_.textureDescriptorInfos();
-        descriptors.allocateSets(bindings, textureInfos);
+        const auto environmentInfos = lighting_.environmentDescriptors();
+        descriptors.allocateSets(bindings, textureInfos, environmentInfos);
         scene_.initializeImageGenerations(descriptors.setCount());
     }
 
@@ -2739,7 +2947,10 @@ private:
 
         if (!scene.skins().empty() || !scene.animations().empty())
         {
-            prepared.animationPlayer.emplace(scene);
+            prepared.animationPlayer.emplace(scene,
+                danvulkan::AnimationPlayer::SamplingSettings{
+                    config_.animation.adaptiveNlerpMaxAngleRadians});
+            prepared.animationActors.resize(prepared.animationPlayer->instanceCount());
         }
         prepared.draws.reserve(plan.draws.size());
         prepared.meshes.reserve(plan.draws.size());
@@ -2770,21 +2981,63 @@ private:
                 static_cast<std::uint32_t>(prepared.meshes.size());
             prepared.meshes.push_back(mesh);
             prepared.bounds.push_back(source.worldBounds);
-            if (prepared.animationPlayer)
+            std::optional<std::size_t> animationInstance;
+            if (prepared.animationPlayer && prepared.animationPlayer->instanceCount() != 0)
+            {
+                animationInstance = source.skin ?
+                    prepared.animationPlayer->instanceForSkin(source.skin) :
+                    prepared.animationPlayer->instanceForNode(source.node);
+            }
+            if (animationInstance)
             {
                 prepared.animatedDraws.push_back(
-                    {source.node, source.transformIndex, meshDataIndex});
+                    {source.node, source.transformIndex, meshDataIndex,
+                        static_cast<std::uint32_t>(*animationInstance)});
+                danvulkan::vk::AnimationActorState& actor =
+                    prepared.animationActors.at(*animationInstance);
+                if (!actor.hasBounds)
+                {
+                    actor.conservativeBounds = source.worldBounds;
+                    actor.hasBounds = true;
+                }
+                else
+                {
+                    actor.conservativeBounds.minVertex = glm::min(
+                        actor.conservativeBounds.minVertex, source.worldBounds.minVertex);
+                    actor.conservativeBounds.maxVertex = glm::max(
+                        actor.conservativeBounds.maxVertex, source.worldBounds.maxVertex);
+                }
             }
             if (source.skin)
             {
-                prepared.skinnedDraws.push_back({source.node, source.skin,
-                    source.transformIndex, source.jointOffset, meshDataIndex});
                 if (prepared.jointMatrices.size() == source.jointOffset)
                 {
+                    const danvulkan::assets::SkinAsset* skin = scene.find(source.skin);
+                    if (skin == nullptr)
+                    {
+                        throw std::runtime_error("planned skin palette is invalid");
+                    }
+                    prepared.skinPalettes.push_back({source.skin, source.jointOffset,
+                        static_cast<std::uint32_t>(skin->joints.size()), animationInstance ?
+                            static_cast<std::uint32_t>(*animationInstance) :
+                            danvulkan::vk::SkinPaletteState::noAnimationInstance});
                     prepared.animationPlayer->appendSkinMatrices(
-                        source.skin, source.node, prepared.jointMatrices);
+                        source.skin, prepared.jointMatrices);
                 }
             }
+        }
+        for (danvulkan::vk::AnimationActorState& actor : prepared.animationActors)
+        {
+            if (!actor.hasBounds)
+            {
+                continue;
+            }
+            const glm::vec3 extent = actor.conservativeBounds.maxVertex -
+                actor.conservativeBounds.minVertex;
+            const glm::vec3 padding = glm::max(
+                extent * config_.animation.conservativeBoundsPadding, glm::vec3(0.01f));
+            actor.conservativeBounds.minVertex -= padding;
+            actor.conservativeBounds.maxVertex += padding;
         }
         if (prepared.jointMatrices.size() != plan.jointMatrixCount)
         {
@@ -2840,7 +3093,9 @@ private:
         scene_.aabbs.clear();
         scene_.animationPlayer_.reset();
         scene_.animatedDraws_.clear();
-        scene_.skinnedDraws_.clear();
+        scene_.skinPalettes_.clear();
+        scene_.animationActors_.clear();
+        scene_.animationUpdatePolicies_.clear();
         scene_.jointMatrices_.clear();
         scene_.textures.clear();
         scene_.textureGenerations_.clear();
@@ -2851,7 +3106,8 @@ private:
 
         scene_.animationPlayer_ = std::move(prepared.animationPlayer);
         scene_.animatedDraws_ = std::move(prepared.animatedDraws);
-        scene_.skinnedDraws_ = std::move(prepared.skinnedDraws);
+        scene_.skinPalettes_ = std::move(prepared.skinPalettes);
+        scene_.animationActors_ = std::move(prepared.animationActors);
         scene_.jointMatrices_ = std::move(prepared.jointMatrices);
 
         scene_.vertexBuffer = createDeviceLocalBuffer(
@@ -2992,12 +3248,6 @@ private:
 
         lightPos = glm::vec3(0.0f, 0.0f, 2.0f);
         lightSpeed = glm::vec3(0.0f);
-
-        PointLight pl;
-        pl.position = lightPos;
-        pl.power = 1.0f;
-        pl.color = glm::vec3(1.0f, 1.0f, 1.0f);
-        pointLights.push_back(pl);
         /* lion head spots
         DrawData lion1 = scene_.drawData[375], lion2 = scene_.drawData[376];
         Vertex v1 = vertices[lion1.vertexOffset];

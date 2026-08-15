@@ -217,6 +217,8 @@ ScenePlan planScene(const assets::SceneAsset& scene, const ScenePlanningLimits& 
 
     // 0 = unvisited, 1 = active recursion path, 2 = already owned by a root/parent.
     std::vector<std::uint8_t> nodeStates(scene.nodes().size(), 0);
+    std::vector<std::uint32_t> skinJointOffsets(
+        scene.skins().size(), std::numeric_limits<std::uint32_t>::max());
     std::function<void(assets::NodeHandle, const glm::mat4&)> visit;
     visit = [&](assets::NodeHandle handle, const glm::mat4& parent)
     {
@@ -263,12 +265,17 @@ ScenePlan planScene(const assets::SceneAsset& scene, const ScenePlanningLimits& 
         std::uint32_t nodeJointOffset = 0;
         if (skin != nullptr)
         {
-            if (skin->joints.size() > limits.jointMatrixCapacity - plan.jointMatrixCount)
+            std::uint32_t& sharedOffset = skinJointOffsets.at(node->skin.slot);
+            if (sharedOffset == std::numeric_limits<std::uint32_t>::max())
             {
-                throw std::runtime_error("scene exceeds renderer joint matrix capacity");
+                if (skin->joints.size() > limits.jointMatrixCapacity - plan.jointMatrixCount)
+                {
+                    throw std::runtime_error("scene exceeds renderer joint matrix capacity");
+                }
+                sharedOffset = plan.jointMatrixCount;
+                plan.jointMatrixCount += static_cast<std::uint32_t>(skin->joints.size());
             }
-            nodeJointOffset = plan.jointMatrixCount;
-            plan.jointMatrixCount += static_cast<std::uint32_t>(skin->joints.size());
+            nodeJointOffset = sharedOffset;
         }
         for (const assets::MeshHandle meshHandle : node->meshes)
         {

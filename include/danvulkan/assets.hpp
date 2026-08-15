@@ -127,6 +127,9 @@ struct TextureAsset
     ColorSpace colorSpace = ColorSpace::srgb;
     TextureSampler sampler;
     std::vector<std::byte> rgba8;
+    // Linear floating-point texels used by HDR environments. Ordinary material textures keep
+    // using rgba8; a decoded image must populate exactly one pixel payload.
+    std::vector<float> rgba32f;
 };
 
 struct MaterialAsset
@@ -217,6 +220,24 @@ struct AnimationClipAsset
     std::vector<AnimationChannelAsset> channels;
 };
 
+struct AnimationNodeBindingAsset
+{
+    // The source is a node targeted by the shared clip. The target is the corresponding node in
+    // this actor's hierarchy.
+    NodeHandle source;
+    NodeHandle target;
+};
+
+struct AnimationInstanceAsset
+{
+    std::string name;
+    AnimationHandle clip;
+    std::vector<AnimationNodeBindingAsset> nodeBindings;
+    float initialPositionSeconds = 0.0f;
+    float playbackSpeed = 1.0f;
+    bool looping = true;
+};
+
 class SceneAsset
 {
 public:
@@ -226,6 +247,7 @@ public:
     NodeHandle addNode(NodeAsset node);
     SkinHandle addSkin(SkinAsset skin);
     AnimationHandle addAnimation(AnimationClipAsset animation);
+    void addAnimationInstance(AnimationInstanceAsset instance);
     void addRootNode(NodeHandle node);
 
     // Moves another scene into this one, remapping every cross-resource handle. The optional
@@ -249,6 +271,10 @@ public:
     {
         return animations_;
     }
+    [[nodiscard]] std::span<const AnimationInstanceAsset> animationInstances() const noexcept
+    {
+        return animationInstances_;
+    }
     [[nodiscard]] std::span<const NodeHandle> rootNodes() const noexcept { return rootNodes_; }
 
 private:
@@ -258,6 +284,7 @@ private:
     std::vector<NodeAsset> nodes_;
     std::vector<SkinAsset> skins_;
     std::vector<AnimationClipAsset> animations_;
+    std::vector<AnimationInstanceAsset> animationInstances_;
     std::vector<NodeHandle> rootNodes_;
 };
 
@@ -266,4 +293,7 @@ private:
 [[nodiscard]] SceneAsset loadObj(const std::filesystem::path& path);
 [[nodiscard]] SceneAsset loadGltf(const std::filesystem::path& path);
 [[nodiscard]] SceneAsset loadScene(const std::filesystem::path& path);
+// Decodes an equirectangular environment into linear RGBA32F texels. HDR files retain values
+// above one; conventional images are promoted and linearized by stb_image.
+[[nodiscard]] TextureAsset loadEnvironment(const std::filesystem::path& path);
 }

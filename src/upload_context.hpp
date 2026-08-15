@@ -3,6 +3,7 @@
 #include "vulkan_raii.hpp"
 
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace danvulkan::vk
@@ -12,6 +13,13 @@ struct UploadArenaStats
     VkDeviceSize capacityBytes = 0;
     std::uint64_t growthCount = 0;
     std::uint64_t uploadCount = 0;
+};
+
+struct ImageUploadLevel
+{
+    VkDeviceSize byteOffset = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
 };
 
 class UploadContext
@@ -34,6 +42,8 @@ public:
         std::string_view name);
     void uploadImage(VkImage destination, std::uint32_t width, std::uint32_t height,
         std::uint32_t mipLevels, const void* rgba8, VkDeviceSize size, std::string_view name);
+    void uploadImageMipChain(VkImage destination, std::span<const ImageUploadLevel> levels,
+        const void* data, VkDeviceSize size, std::string_view name);
     void copyBuffer(VkBuffer source, VkBuffer destination, VkDeviceSize size,
         VkBufferUsageFlags destinationUsage, std::string_view name);
 

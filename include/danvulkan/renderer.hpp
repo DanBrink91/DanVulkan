@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -32,6 +33,25 @@ struct RendererMemoryPolicy
     bool preferLazilyAllocatedAttachments = true;
 };
 
+struct RendererAnimationPolicy
+{
+    // Actor bounds are tested before pose evaluation. Playback clocks continue advancing while
+    // an off-screen pose retains its last evaluated transforms and palettes.
+    bool cullOffscreenActors = true;
+    // Actors within this distance evaluate every rendered frame.
+    float fullRateDistance = 15.0f;
+    // Actors between the full-rate and reduced-rate distances use mediumUpdatesPerSecond;
+    // actors beyond this distance use farUpdatesPerSecond.
+    float reducedRateDistance = 35.0f;
+    float mediumUpdatesPerSecond = 30.0f;
+    float farUpdatesPerSecond = 15.0f;
+    // Initial grouped draw bounds retain this proportional margin and only expand afterward.
+    float conservativeBoundsPadding = 0.2f;
+    // Zero retains exact quaternion slerp. A positive value enables normalized linear
+    // interpolation only for adjacent rotation keys within this angular distance in radians.
+    float adaptiveNlerpMaxAngleRadians = 0.0f;
+};
+
 struct RendererConfig
 {
     std::string applicationName = "DanVulkan";
@@ -41,12 +61,20 @@ struct RendererConfig
     std::vector<AdditionalSceneConfig> additionalScenes;
     std::uint32_t maxTextures = 256;
     std::uint32_t maxMaterials = 2048;
+    // Lighting uses a per-swapchain-image storage buffer. The shader ABI supports at most 256
+    // lights; lower values reduce persistent host-visible memory.
+    std::uint32_t maxPointLights = 64;
+    // Optional decoded equirectangular image used for image-based lighting. RGBA8 and linear
+    // RGBA32F payloads are accepted; assets::loadEnvironment preserves HDR radiance. Null selects
+    // a small renderer-owned neutral sky, so the environment descriptors are always valid.
+    std::optional<danvulkan::assets::TextureAsset> environmentMap;
     // Negative values retain a finer mip level for sharper minified textures. The default is
     // deliberately mild because the bundled scene packs broad terrain surfaces into an atlas.
     float textureMipLodBias = -0.5f;
     std::uint32_t initialVertexCapacity = 4096;
     std::uint32_t initialIndexCapacity = 8192;
     RendererMemoryPolicy memory;
+    RendererAnimationPolicy animation;
     std::uint64_t maxFrames = 0;
     std::uint64_t resizeAtFrame = 0;
     std::uint32_t resizeWidth = 960;
@@ -54,6 +82,27 @@ struct RendererConfig
     // Null selects the renderer-owned GLFW backend. Supplying an adapter keeps native window
     // and input ownership in the host application.
     std::shared_ptr<RendererPlatform> platform;
+};
+
+inline constexpr std::uint32_t MaxScenePointLights = 256;
+
+struct ScenePointLight
+{
+    glm::vec3 position{0.0f, 0.0f, 2.0f};
+    // Zero disables range falloff beyond inverse-square attenuation.
+    float range = 0.0f;
+    glm::vec3 color{1.0f};
+    float intensity = 25.0f;
+};
+
+struct SceneEnvironment
+{
+    glm::vec3 tint{1.0f};
+    float intensity = 0.03f;
+    // Rotation is around world up and is expressed in radians.
+    float rotation = 0.0f;
+    float diffuseStrength = 1.0f;
+    float specularStrength = 1.0f;
 };
 
 // Per-frame state for the active scene, initially loaded through RendererConfig::modelPath.
@@ -66,7 +115,8 @@ struct SceneSubmission
     // GLM configuration and the renderer performs the framebuffer Y inversion.
     glm::mat4 projection{1.0f};
     glm::vec3 cameraPosition{0.0f};
-    glm::vec3 lightPosition{0.0f, 0.0f, 2.0f};
+    std::vector<ScenePointLight> pointLights{ScenePointLight{}};
+    SceneEnvironment environment;
 };
 
 struct SceneInstanceHandle
@@ -249,11 +299,24 @@ struct SceneTextureInfo
 struct RendererPerformanceStats
 {
     std::uint64_t renderedFrames = 0;
+    // End-to-end wall time from beginFrame through presentation. This includes synchronization
+    // and presentation pacing; frameCpuMilliseconds is CPU time consumed by the render thread.
+    double frameMilliseconds = 0.0;
     double frameCpuMilliseconds = 0.0;
     double frameGpuMilliseconds = 0.0;
     double animationCpuMilliseconds = 0.0;
     double animationEvaluationCpuMilliseconds = 0.0;
     double animationSynchronizationCpuMilliseconds = 0.0;
+    double animationSamplingCpuMilliseconds = 0.0;
+    double animationPoseResetCpuMilliseconds = 0.0;
+    double animationTimelineResolutionCpuMilliseconds = 0.0;
+    double animationVectorSamplingCpuMilliseconds = 0.0;
+    double animationRotationSamplingCpuMilliseconds = 0.0;
+    double animationTransformPropagationCpuMilliseconds = 0.0;
+    double animationTransformUpdateCpuMilliseconds = 0.0;
+    double animationBoundsCpuMilliseconds = 0.0;
+    double animationPaletteGenerationCpuMilliseconds = 0.0;
+    double animationPaletteUploadCpuMilliseconds = 0.0;
     double cullingCpuMilliseconds = 0.0;
     double bufferWriteCpuMilliseconds = 0.0;
     double commandRecordingCpuMilliseconds = 0.0;
@@ -261,6 +324,19 @@ struct RendererPerformanceStats
     std::uint32_t visibleDraws = 0;
     std::uint32_t animatedDraws = 0;
     std::uint32_t jointMatrices = 0;
+    std::uint32_t pointLights = 0;
+    std::uint32_t animationActors = 0;
+    std::uint32_t evaluatedAnimationActors = 0;
+    std::uint32_t culledAnimationActors = 0;
+    std::uint32_t sampledAnimationChannels = 0;
+    std::uint32_t sampledAnimationVectorChannels = 0;
+    std::uint32_t sampledAnimationRotationChannels = 0;
+    std::uint32_t nlerpAnimationRotationChannels = 0;
+    std::uint32_t animationClipChannels = 0;
+    std::uint32_t foldedConstantAnimationChannels = 0;
+    std::uint32_t animationPropagatedNodes = 0;
+    std::uint32_t animationPoseComposedNodes = 0;
+    std::uint32_t animationCachedLocalNodes = 0;
 };
 
 struct RendererMemoryStats

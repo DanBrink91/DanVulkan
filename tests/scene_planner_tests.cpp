@@ -3,6 +3,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 
@@ -57,8 +58,25 @@ int main()
         const danvulkan::ScenePlan animatedPlan =
             danvulkan::planScene(composed, generousLimits());
         require(animatedPlan.draws.size() == 7, "composed scene lost planned draws");
-        require(animatedPlan.jointMatrixCount == 375,
+        require(animatedPlan.jointMatrixCount == 75,
             "skinned node palette assignments were not planned");
+        std::optional<std::uint32_t> sharedJointOffset;
+        std::uint32_t skinnedDrawCount = 0;
+        for (const danvulkan::PlannedSceneDraw& draw : animatedPlan.draws)
+        {
+            if (!draw.skin)
+            {
+                continue;
+            }
+            ++skinnedDrawCount;
+            if (!sharedJointOffset)
+            {
+                sharedJointOffset = draw.jointOffset;
+            }
+            require(draw.jointOffset == *sharedJointOffset,
+                "mesh nodes using one skin did not share a joint palette");
+        }
+        require(skinnedDrawCount == 5, "unexpected skinned draw count");
         require(animatedPlan.transforms.size() < composed.nodes().size(),
             "non-renderable hierarchy nodes incorrectly consumed transform slots");
 

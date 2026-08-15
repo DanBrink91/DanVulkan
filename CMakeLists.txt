@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(DanVulkan VERSION 0.29.0 LANGUAGES C CXX)
+project(DanVulkan VERSION 0.31.0 LANGUAGES C CXX)
 
 include(CTest)
 include(FetchContent)
@@ -117,10 +117,16 @@ add_library(danvulkan_renderer STATIC
     src/device_context.hpp
     src/device_planner.cpp
     src/device_planner.hpp
+    src/environment_precompute.cpp
+    src/environment_precompute.hpp
     src/frame_context.cpp
     src/frame_context.hpp
     src/glfw_platform.cpp
     src/glfw_platform.hpp
+    src/lighting_context.cpp
+    src/lighting_context.hpp
+    src/lighting_planner.cpp
+    src/lighting_planner.hpp
     src/memory_planner.cpp
     src/memory_planner.hpp
     src/pipeline_context.cpp
@@ -221,6 +227,14 @@ if(BUILD_TESTING)
         tests/memory_planner_tests.cpp
         src/memory_planner.cpp
     )
+    add_executable(danvulkan_lighting_planner_tests
+        tests/lighting_planner_tests.cpp
+        src/lighting_planner.cpp
+    )
+    add_executable(danvulkan_environment_precompute_tests
+        tests/environment_precompute_tests.cpp
+        src/environment_precompute.cpp
+    )
     add_executable(danvulkan_scene_planner_tests
         tests/scene_planner_tests.cpp
         src/scene_planner.cpp
@@ -240,6 +254,15 @@ if(BUILD_TESTING)
     target_include_directories(danvulkan_memory_planner_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_features(danvulkan_memory_planner_tests PRIVATE cxx_std_20)
     target_link_libraries(danvulkan_memory_planner_tests PRIVATE Vulkan::Vulkan)
+    target_include_directories(danvulkan_lighting_planner_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_features(danvulkan_lighting_planner_tests PRIVATE cxx_std_20)
+    target_link_libraries(danvulkan_lighting_planner_tests PRIVATE DanVulkan::Assets glm::glm)
+    target_include_directories(danvulkan_environment_precompute_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_features(danvulkan_environment_precompute_tests PRIVATE cxx_std_20)
+    target_link_libraries(danvulkan_environment_precompute_tests PRIVATE
+        DanVulkan::Assets glm::glm)
     target_include_directories(danvulkan_scene_planner_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_features(danvulkan_scene_planner_tests PRIVATE cxx_std_20)
     target_link_libraries(danvulkan_scene_planner_tests PRIVATE DanVulkan::Assets glm::glm)
@@ -255,6 +278,8 @@ if(BUILD_TESTING)
         target_compile_options(danvulkan_swapchain_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_pipeline_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_memory_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
+        target_compile_options(danvulkan_lighting_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
+        target_compile_options(danvulkan_environment_precompute_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_scene_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_scene_context_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
     else()
@@ -265,6 +290,8 @@ if(BUILD_TESTING)
         target_compile_options(danvulkan_swapchain_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_pipeline_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_memory_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(danvulkan_lighting_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(danvulkan_environment_precompute_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_scene_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_scene_context_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
@@ -276,6 +303,8 @@ if(BUILD_TESTING)
     add_test(NAME danvulkan_swapchain_planning COMMAND danvulkan_swapchain_planner_tests)
     add_test(NAME danvulkan_pipeline_planning COMMAND danvulkan_pipeline_planner_tests)
     add_test(NAME danvulkan_memory_planning COMMAND danvulkan_memory_planner_tests)
+    add_test(NAME danvulkan_lighting_planning COMMAND danvulkan_lighting_planner_tests)
+    add_test(NAME danvulkan_environment_precompute COMMAND danvulkan_environment_precompute_tests)
     add_test(NAME danvulkan_scene_planning COMMAND danvulkan_scene_planner_tests)
     add_test(NAME danvulkan_scene_context COMMAND danvulkan_scene_context_tests)
     add_test(NAME danvulkan_validation_smoke COMMAND DanVulkan --smoke-test)
@@ -290,6 +319,8 @@ if(BUILD_TESTING)
         danvulkan_swapchain_planning
         danvulkan_pipeline_planning
         danvulkan_memory_planning
+        danvulkan_lighting_planning
+        danvulkan_environment_precompute
         danvulkan_scene_planning
         danvulkan_scene_context
         danvulkan_validation_smoke danvulkan_validation_platform

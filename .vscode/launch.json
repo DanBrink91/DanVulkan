@@ -2,13 +2,24 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "DanVulkan (Debug)",
+      "name": "DanVulkan (Windows Debug)",
       "type": "cppvsdbg",
       "request": "launch",
       "program": "${workspaceFolder}\\build\\windows\\Debug\\DanVulkan.exe",
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "externalConsole": false,
+      "preLaunchTask": "CMake: build (Debug)"
+    },
+    {
+      "name": "DanVulkan (macOS Debug)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/macos/DanVulkan",
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "lldb",
       "preLaunchTask": "CMake: build (Debug)"
     }
   ]

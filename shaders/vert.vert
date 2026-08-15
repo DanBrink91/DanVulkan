@@ -6,7 +6,9 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
     mat4 view;
     mat4 projection;
     vec4 cameraPositionTime;
-    vec4 lightPosition;
+    uvec4 lightingCounts;
+    vec4 environmentTintIntensity;
+    vec4 environmentControls;
 } ubo;
 
 struct Vertex
@@ -73,24 +75,35 @@ void main()
     vec3 position = vertex.position;
     vec3 normal = vertex.normal;
     vec3 tangent = vertex.tangent;
+    vec4 worldPosition;
+    vec3 worldNormal;
+    vec3 worldTangent;
+    float worldTangentSign;
     if (draw.jointOffset >= 0)
     {
         mat4 skin = vertex.weights.x * jointMatrices[draw.jointOffset + int(vertex.joints.x)] +
             vertex.weights.y * jointMatrices[draw.jointOffset + int(vertex.joints.y)] +
             vertex.weights.z * jointMatrices[draw.jointOffset + int(vertex.joints.z)] +
             vertex.weights.w * jointMatrices[draw.jointOffset + int(vertex.joints.w)];
-        position = (skin * vec4(position, 1.0)).xyz;
-        normal = mat3(skin) * normal;
-        tangent = mat3(skin) * tangent;
+        // Joint palettes are world-space and shared by every mesh node using this skin.
+        worldPosition = skin * vec4(position, 1.0);
+        worldNormal = mat3(skin) * normal;
+        worldTangent = mat3(skin) * tangent;
+        worldTangentSign = vertex.tangentSign * sign(determinant(mat3(skin)));
     }
-    vec4 worldPosition = model * vec4(position, 1.0);
-    mat3 normalMatrix = transpose(inverse(mat3(model)));
+    else
+    {
+        worldPosition = model * vec4(position, 1.0);
+        mat3 normalMatrix = transpose(inverse(mat3(model)));
+        worldNormal = normalMatrix * normal;
+        worldTangent = mat3(model) * tangent;
+        worldTangentSign = vertex.tangentSign * sign(determinant(mat3(model)));
+    }
 
     gl_Position = ubo.projection * ubo.view * worldPosition;
     outTexCoord = vertex.texCoord;
     outMaterialIndex = draw.materialIndex;
-    outWorldNormal = normalize(normalMatrix * normal);
-    outWorldTangent = vec4(normalize(mat3(model) * tangent),
-        vertex.tangentSign * sign(determinant(mat3(model))));
+    outWorldNormal = normalize(worldNormal);
+    outWorldTangent = vec4(normalize(worldTangent), worldTangentSign);
     outWorldPosition = worldPosition.xyz;
 }

@@ -32,7 +32,8 @@ cmake --build --preset debug
 Run the CPU asset, animation-player, and planning tests plus validation-layer standalone-loop,
 step-driven, resize, minimize/restore, and animated stress paths with `ctest --preset debug`.
 
-Run the executable with the repository root as its working directory so it can find `models/` and `textures/`.
+Run the executable with the repository root as its working directory so it can find `models/`,
+`textures/`, and the looping `audio/bg.mp3` background track.
 
 ## macOS with MoltenVK
 
@@ -50,7 +51,13 @@ Use `cmake --preset macos-release` followed by `cmake --build --preset macos-rel
 
 ## Module boundary
 
-Applications include `<danvulkan/renderer.hpp>`, create a `RendererConfig`, and own a `VulkanRenderer`. The public header hides Vulkan and windowing implementation details behind a private implementation. Applications can either call `run()` for the standalone demo or own the loop through `initialize()`, `beginFrame()`, `submitScene()`, `endFrame()`, and `shutdown()`:
+The executable's application-facing code lives in `src/application/`. `GameApp` owns the window,
+input translation, clock, main loop, and `GameAudio` lifetime; `GameWorld` owns demo/gameplay state
+and creates each `SceneSubmission`; `GameCamera` owns navigation and camera matrices. These are the
+primary files to extend when building a demo or gameplay feature. The normal no-argument launch uses
+this layer, while command-line validation and profiling modes stay isolated in `main.cpp`.
+
+Reusable hosts include `<danvulkan/renderer.hpp>`, create a `RendererConfig`, and own a `VulkanRenderer`. The public header hides Vulkan and windowing implementation details behind a private implementation. Applications can either use the compatibility `run()` loop or own the loop through `initialize()`, `beginFrame()`, `submitScene()`, `endFrame()`, and `shutdown()`:
 
 ```cpp
 VulkanRenderer renderer(config);
@@ -77,7 +84,7 @@ while (!renderer.shouldClose())
 renderer.shutdown();
 ```
 
-The renderer loads the scene named by `RendererConfig::modelPath` during initialization. `SceneSubmission` supplies per-frame view, point-light, and environment controls. Additional `ScenePointLight` values can be appended independently, up to `RendererConfig::maxPointLights`. `sceneMeshes()`, `sceneInstances()`, and `sceneMaterials()` expose generation-tagged handles plus their current values. Between frames, games can create and remove PBR materials, upload and remove meshes, create and remove instances, and update world transforms or material factors. Destroyed material, mesh, and instance slots are reusable, but their generations advance so stale handles are rejected.
+The renderer loads the scene named by `RendererConfig::modelPath` during initialization. `SceneSubmission` supplies per-frame view, point-light, and environment controls. Additional `ScenePointLight` values can be appended independently, up to `RendererConfig::maxPointLights`. `sceneBounds()` supplies optional combined world-space bounds for app-owned camera framing. `sceneMeshes()`, `sceneInstances()`, and `sceneMaterials()` expose generation-tagged handles plus their current values. Between frames, games can create and remove PBR materials, upload and remove meshes, create and remove instances, and update world transforms or material factors. Destroyed material, mesh, and instance slots are reusable, but their generations advance so stale handles are rejected.
 
 Internally, physical-device probing and logical-device ownership live in a focused device context. Selection requires Vulkan 1.4, every renderer feature, complete graphics/presentation queues, and adequate swapchain support; suitable candidates are scored deterministically rather than accepted in driver enumeration order. Queue-family selection and candidate scoring are Vulkan-free planning functions with dedicated CPU tests.
 
@@ -122,7 +129,7 @@ propagation plan, with allocation-free per-instance subtree ranges. Pose-driven 
 directly into parent space, while static TRS and affine matrix locals reuse a cached matrix;
 arbitrary matrix-authored locals retain the general multiplication path.
 
-The convenience demo captures the mouse for first-person look, uses WASD for movement, and closes with Escape. Its initial camera position, clip planes, and movement speed are derived from the loaded scene bounds, so changing the configured model does not require another hard-coded camera pose.
+The application demo captures the mouse for first-person look, uses WASD to move the free camera, scrolls forward/backward, toggles between free and ninja-follow cameras when C is released, and closes with Escape. In follow mode, WASD instead moves the ninja while the chase camera tracks it. Its initial free-camera position, clip planes, and movement speed are derived from `sceneBounds()`, so changing the configured model does not require another hard-coded camera pose.
 
 Leaving `RendererConfig::platform` null selects the convenient renderer-owned GLFW backend. A host application can instead supply a shared `RendererPlatform` implementation around its existing native window. The adapter provides event pumping, close state, framebuffer extent and resize notification, Vulkan instance extensions, and surface creation without exposing GLFW types. The renderer owns the returned `VkSurfaceKHR`, while native-window and input ownership stay with the adapter/host. An adapter may make `pollEvents()` a no-op when the host pumps events before `beginFrame()`. `makeGlfwRendererPlatform()` exposes the default backend explicitly when desired.
 

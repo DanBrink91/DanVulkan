@@ -121,7 +121,9 @@ struct AnimatedDrawState
 struct AnimationActorState
 {
     assets::Bounds conservativeBounds{};
+    glm::mat4 worldOffset{1.0f};
     bool hasBounds = false;
+    bool transformDirty = false;
 };
 
 struct AnimationUpdateSettings
@@ -206,6 +208,7 @@ public:
     void reserveFrameScratch();
     [[nodiscard]] AnimationSynchronizationTimings synchronizeAnimationPose(
         bool changedInstancesOnly = false);
+    void setAnimationActorTransform(std::size_t actorIndex, const glm::mat4& worldOffset);
     [[nodiscard]] AnimationUpdateCounts prepareAnimationUpdates(const glm::mat4& view,
         const glm::mat4& projection, const glm::vec3& cameraPosition,
         const AnimationUpdateSettings& settings);

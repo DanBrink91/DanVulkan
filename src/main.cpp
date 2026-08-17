@@ -1,5 +1,8 @@
 #include <danvulkan/renderer.hpp>
 
+#include "application/game_app.hpp"
+#include "application/game_world.hpp"
+
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -290,15 +293,17 @@ int main(int argc, char** argv)
     try
     {
         RendererConfig config;
-        config.additionalScenes.push_back({
-            "models/ninja_run_free_fire_emote.glb",
-            glm::translate(glm::mat4(1.0f), glm::vec3(2.18f, -0.335f, -2.89f)) *
-                glm::scale(glm::mat4(1.0f), glm::vec3(0.2f))
-        });
+        danvulkan::application::GameWorld::configureRenderer(config);
         bool stepDriven = false;
         bool animatedStress = false;
         bool animatedStressAdaptiveNlerp = false;
-        if (argc > 1 && std::string_view(argv[1]) == "--smoke-test")
+        bool applicationDriven = argc == 1;
+        if (argc > 1 && std::string_view(argv[1]) == "--application-smoke-test")
+        {
+            config.maxFrames = 120;
+            applicationDriven = true;
+        }
+        else if (argc > 1 && std::string_view(argv[1]) == "--smoke-test")
         {
             config.maxFrames = 120;
         }
@@ -342,6 +347,15 @@ int main(int argc, char** argv)
             {
                 config.animation.adaptiveNlerpMaxAngleRadians = glm::radians(20.0f);
             }
+        }
+
+        if (applicationDriven)
+        {
+            const bool enableBackgroundMusic = argc == 1;
+            danvulkan::application::GameApp application(
+                std::move(config), enableBackgroundMusic);
+            application.run();
+            return EXIT_SUCCESS;
         }
 
         VulkanRenderer renderer(std::move(config));

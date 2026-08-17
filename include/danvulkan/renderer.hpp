@@ -105,6 +105,30 @@ struct SceneEnvironment
     float specularStrength = 1.0f;
 };
 
+struct SceneAnimationActorHandle
+{
+    static constexpr std::uint32_t invalidSlot = std::numeric_limits<std::uint32_t>::max();
+
+    std::uint32_t slot = invalidSlot;
+    std::uint32_t generation = 0;
+
+    [[nodiscard]] constexpr bool valid() const noexcept
+    {
+        return slot != invalidSlot && generation != 0;
+    }
+
+    constexpr explicit operator bool() const noexcept { return valid(); }
+    friend constexpr bool operator==(
+        SceneAnimationActorHandle, SceneAnimationActorHandle) noexcept = default;
+};
+
+struct SceneAnimationActorTransform
+{
+    SceneAnimationActorHandle actor;
+    // Applied above the actor's imported root transform. Identity retains its authored pose.
+    glm::mat4 worldOffset{1.0f};
+};
+
 // Per-frame state for the active scene, initially loaded through RendererConfig::modelPath.
 // Scene resources remain renderer-owned; applications own when and how this
 // view is submitted.
@@ -117,6 +141,7 @@ struct SceneSubmission
     glm::vec3 cameraPosition{0.0f};
     std::vector<ScenePointLight> pointLights{ScenePointLight{}};
     SceneEnvironment environment;
+    std::vector<SceneAnimationActorTransform> animationActorTransforms;
 };
 
 struct SceneInstanceHandle
@@ -214,6 +239,13 @@ struct SceneAnimationInfo
     float durationSeconds = 0.0f;
 };
 
+struct SceneAnimationActorInfo
+{
+    SceneAnimationActorHandle handle;
+    SceneAnimationHandle animation;
+    glm::mat4 worldOffset{1.0f};
+};
+
 struct AnimationPlaybackState
 {
     SceneAnimationHandle clip;
@@ -263,6 +295,12 @@ struct SceneInstanceInfo
     std::string name;
     // This is the model-to-world transform. Hierarchy evaluation happened during import.
     glm::mat4 worldTransform{1.0f};
+};
+
+struct SceneBounds
+{
+    glm::vec3 minimum{0.0f};
+    glm::vec3 maximum{0.0f};
 };
 
 struct SceneMaterialInfo
@@ -390,10 +428,16 @@ public:
     // destroyed. Mutations happen between frames and reach a swapchain image only after its
     // in-flight fence waits.
     [[nodiscard]] std::vector<SceneInstanceInfo> sceneInstances() const;
+    // The combined world-space bounds of all live scene draws. An empty scene has no bounds.
+    // This is useful for application-owned camera framing and editor navigation.
+    [[nodiscard]] std::optional<SceneBounds> sceneBounds() const;
     [[nodiscard]] std::vector<SceneMaterialInfo> sceneMaterials() const;
     [[nodiscard]] std::vector<SceneMeshInfo> sceneMeshes() const;
     [[nodiscard]] std::vector<SceneTextureInfo> sceneTextures() const;
     [[nodiscard]] std::vector<SceneAnimationInfo> sceneAnimations() const;
+    // Actors are independently transformable animation instances. Their generation follows the
+    // uploaded scene, so a replacement invalidates offsets retained by an application.
+    [[nodiscard]] std::vector<SceneAnimationActorInfo> sceneAnimationActors() const;
     [[nodiscard]] AnimationPlaybackState animationPlaybackState() const;
     // Rolling measurements are diagnostic rather than benchmark guarantees. They remain
     // available after shutdown so automated stress modes can print their final sample.

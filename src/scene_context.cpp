@@ -88,6 +88,41 @@ assets::Bounds SceneContext::transformedBounds(const assets::Bounds& bounds,
     return result;
 }
 
+void SceneContext::setAnimationActorTransform(
+    std::size_t actorIndex, const glm::mat4& worldOffset)
+{
+    AnimationActorState& actor = animationActors_.at(actorIndex);
+    bool unchanged = true;
+    for (glm::length_t column = 0; column < 4 && unchanged; ++column)
+    {
+        for (glm::length_t row = 0; row < 4; ++row)
+        {
+            unchanged = unchanged &&
+                worldOffset[column][row] == actor.worldOffset[column][row];
+        }
+    }
+    if (unchanged)
+    {
+        return;
+    }
+    const glm::mat4 delta = worldOffset * glm::inverse(actor.worldOffset);
+    actor.worldOffset = worldOffset;
+    actor.transformDirty = true;
+
+    if (actor.hasBounds)
+    {
+        actor.conservativeBounds = transformedBounds(actor.conservativeBounds, delta);
+    }
+    for (const AnimatedDrawState& state : animatedDraws_)
+    {
+        if (state.animationInstance != actorIndex)
+        {
+            continue;
+        }
+        aabbs.at(state.meshDataIndex) = transformedBounds(aabbs.at(state.meshDataIndex), delta);
+    }
+}
+
 AnimationSynchronizationTimings SceneContext::synchronizeAnimationPose(bool changedInstancesOnly)
 {
     AnimationSynchronizationTimings timings;
@@ -100,7 +135,8 @@ AnimationSynchronizationTimings SceneContext::synchronizeAnimationPose(bool chan
     {
         if (changedInstancesOnly &&
             (state.animationInstance == SkinPaletteState::noAnimationInstance ||
-             !animationPlayer_->instanceEvaluated(state.animationInstance)))
+             (!animationPlayer_->instanceEvaluated(state.animationInstance) &&
+              !animationActors_.at(state.animationInstance).transformDirty)))
         {
             continue;
         }
@@ -109,7 +145,8 @@ AnimationSynchronizationTimings SceneContext::synchronizeAnimationPose(bool chan
         {
             throw std::runtime_error("animated renderer state is inconsistent");
         }
-        const glm::mat4& world = animationPlayer_->worldTransform(state.node);
+        const glm::mat4 world = animationActors_.at(state.animationInstance).worldOffset *
+            animationPlayer_->worldTransform(state.node);
         transformData[state.transformIndex].model = world;
     }
     timings.transformUpdateMilliseconds = std::chrono::duration<double, std::milli>(
@@ -118,11 +155,13 @@ AnimationSynchronizationTimings SceneContext::synchronizeAnimationPose(bool chan
     for (const AnimatedDrawState& state : animatedDraws_)
     {
         if (changedInstancesOnly &&
-            !animationPlayer_->instanceEvaluated(state.animationInstance))
+            !animationPlayer_->instanceEvaluated(state.animationInstance) &&
+            !animationActors_.at(state.animationInstance).transformDirty)
         {
             continue;
         }
-        const glm::mat4& world = animationPlayer_->worldTransform(state.node);
+        const glm::mat4 world = animationActors_.at(state.animationInstance).worldOffset *
+            animationPlayer_->worldTransform(state.node);
         aabbs[state.meshDataIndex] = transformedBounds(meshData[state.meshDataIndex].localBounds,
             world);
         AnimationActorState& actor = animationActors_.at(state.animationInstance);
@@ -146,7 +185,8 @@ AnimationSynchronizationTimings SceneContext::synchronizeAnimationPose(bool chan
     {
         if (changedInstancesOnly &&
             (state.animationInstance == SkinPaletteState::noAnimationInstance ||
-             !animationPlayer_->instanceEvaluated(state.animationInstance)))
+             (!animationPlayer_->instanceEvaluated(state.animationInstance) &&
+              !animationActors_.at(state.animationInstance).transformDirty)))
         {
             continue;
         }
@@ -158,6 +198,16 @@ AnimationSynchronizationTimings SceneContext::synchronizeAnimationPose(bool chan
         animationPlayer_->writeSkinMatrices(state.skin,
             std::span<glm::mat4>(jointMatrices_).subspan(
                 state.jointOffset, state.jointCount));
+        if (state.animationInstance != SkinPaletteState::noAnimationInstance)
+        {
+            const glm::mat4& worldOffset =
+                animationActors_.at(state.animationInstance).worldOffset;
+            for (glm::mat4& joint : std::span<glm::mat4>(jointMatrices_).subspan(
+                     state.jointOffset, state.jointCount))
+            {
+                joint = worldOffset * joint;
+            }
+        }
     }
     if (jointMatrices_.size() > JointMatrixCount)
     {
@@ -165,6 +215,10 @@ AnimationSynchronizationTimings SceneContext::synchronizeAnimationPose(bool chan
     }
     timings.paletteGenerationMilliseconds = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - paletteBegin).count();
+    for (AnimationActorState& actor : animationActors_)
+    {
+        actor.transformDirty = false;
+    }
     return timings;
 }
 

@@ -388,9 +388,19 @@ AnimationPlayer::AnimationPlayer(const assets::SceneAsset& scene, SamplingSettin
     }
     else if (!definition->instances.empty())
     {
-        for (std::size_t node = 0; node < definition->nodes.size(); ++node)
+        for (const InstanceDefinition& instance : definition->instances)
         {
-            definition->nodeInstances[node] = 0;
+            for (const std::vector<std::size_t>& targets : instance.channelTargets)
+            {
+                for (const std::size_t target : targets)
+                {
+                    assignNode(target, 0);
+                }
+            }
+            for (const std::size_t target : instance.constantChannelTargets)
+            {
+                assignNode(target, 0);
+            }
         }
     }
 
@@ -882,6 +892,12 @@ float AnimationPlayer::position() const noexcept
 float AnimationPlayer::instancePosition(std::size_t instance) const
 {
     return playback_.at(instance).position;
+}
+
+std::size_t AnimationPlayer::instanceClip(std::size_t instance) const
+{
+    const PlaybackState& state = playback_.at(instance);
+    return definition_->instances.at(state.definition).clip;
 }
 
 bool AnimationPlayer::instanceEvaluated(std::size_t instance) const

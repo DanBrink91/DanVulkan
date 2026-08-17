@@ -285,6 +285,7 @@ public:
         try
         {
             const auto animationBegin = std::chrono::steady_clock::now();
+            applyAnimationActorTransforms(pendingSubmission_);
             updateAnimation(animationDeltaSeconds_, pendingSubmission_);
             animationCpuAvg_ = rollingAverage(
                 animationCpuAvg_, millisecondsSince(animationBegin));
@@ -319,6 +320,23 @@ public:
                 scene_.instanceNames[index],
                 scene_.transformData[index].model
             });
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::optional<SceneBounds> sceneBounds() const
+    {
+        requireInitialized("sceneBounds");
+        if (scene_.aabbs.empty())
+        {
+            return std::nullopt;
+        }
+
+        SceneBounds result{scene_.aabbs.front().minVertex, scene_.aabbs.front().maxVertex};
+        for (std::size_t index = 1; index < scene_.aabbs.size(); ++index)
+        {
+            result.minimum = glm::min(result.minimum, scene_.aabbs[index].minVertex);
+            result.maximum = glm::max(result.maximum, scene_.aabbs[index].maxVertex);
         }
         return result;
     }
@@ -389,6 +407,29 @@ public:
                 SceneAnimationHandle{ static_cast<std::uint32_t>(index), scene_.sceneGeneration_ },
                 std::string(scene_.animationPlayer_->clipName(index)),
                 scene_.animationPlayer_->clipDuration(index)
+            });
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::vector<SceneAnimationActorInfo> sceneAnimationActors() const
+    {
+        requireInitialized("sceneAnimationActors");
+        std::vector<SceneAnimationActorInfo> result;
+        if (!scene_.animationPlayer_)
+        {
+            return result;
+        }
+        result.reserve(scene_.animationActors_.size());
+        for (std::size_t index = 0; index < scene_.animationActors_.size(); ++index)
+        {
+            result.push_back({
+                SceneAnimationActorHandle{static_cast<std::uint32_t>(index),
+                    scene_.sceneGeneration_},
+                SceneAnimationHandle{
+                    static_cast<std::uint32_t>(scene_.animationPlayer_->instanceClip(index)),
+                    scene_.sceneGeneration_},
+                scene_.animationActors_[index].worldOffset
             });
         }
         return result;
@@ -1175,6 +1216,7 @@ private:
     float animationDeltaSeconds_ = 0.0f;
     SceneSubmission pendingSubmission_;
     SceneSubmission demoSubmission_;
+    std::vector<std::uint8_t> submittedAnimationActorScratch_;
     danvulkan::LightingPlan lightingPlan_;
     bool hasPendingSubmission_ = false;
 
@@ -2465,6 +2507,46 @@ private:
             synchronization.paletteGenerationMilliseconds);
     }
 
+    void applyAnimationActorTransforms(const SceneSubmission& submission)
+    {
+        if (submission.animationActorTransforms.empty())
+        {
+            return;
+        }
+        submittedAnimationActorScratch_.assign(scene_.animationActors_.size(), 0U);
+        for (const SceneAnimationActorTransform& submitted :
+             submission.animationActorTransforms)
+        {
+            if (submitted.actor.generation != scene_.sceneGeneration_ ||
+                submitted.actor.slot >= scene_.animationActors_.size())
+            {
+                throw std::invalid_argument(
+                    "scene submission contains an invalid or stale animation actor handle");
+            }
+            if (submittedAnimationActorScratch_[submitted.actor.slot] != 0U)
+            {
+                throw std::invalid_argument(
+                    "scene submission contains duplicate animation actor transforms");
+            }
+            submittedAnimationActorScratch_[submitted.actor.slot] = 1U;
+            bool finite = true;
+            for (glm::length_t column = 0; column < 4 && finite; ++column)
+            {
+                for (glm::length_t row = 0; row < 4; ++row)
+                {
+                    finite = finite && std::isfinite(submitted.worldOffset[column][row]);
+                }
+            }
+            const float determinant = glm::determinant(submitted.worldOffset);
+            if (!finite || !std::isfinite(determinant) || std::abs(determinant) < 0.000001f)
+            {
+                throw std::invalid_argument(
+                    "scene submission contains a non-invertible animation actor transform");
+            }
+            scene_.setAnimationActorTransform(submitted.actor.slot, submitted.worldOffset);
+        }
+    }
+
     void rebuildSwapchainIndexedResources()
     {
         descriptors.resetSets();
@@ -3304,6 +3386,11 @@ std::vector<SceneInstanceInfo> VulkanRenderer::sceneInstances() const
     return impl_->sceneInstances();
 }
 
+std::optional<SceneBounds> VulkanRenderer::sceneBounds() const
+{
+    return impl_->sceneBounds();
+}
+
 std::vector<SceneMaterialInfo> VulkanRenderer::sceneMaterials() const
 {
     return impl_->sceneMaterials();
@@ -3322,6 +3409,11 @@ std::vector<SceneTextureInfo> VulkanRenderer::sceneTextures() const
 std::vector<SceneAnimationInfo> VulkanRenderer::sceneAnimations() const
 {
     return impl_->sceneAnimations();
+}
+
+std::vector<SceneAnimationActorInfo> VulkanRenderer::sceneAnimationActors() const
+{
+    return impl_->sceneAnimationActors();
 }
 
 AnimationPlaybackState VulkanRenderer::animationPlaybackState() const

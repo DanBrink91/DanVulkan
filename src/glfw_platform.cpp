@@ -30,6 +30,7 @@ public:
 
         glfwSetWindowUserPointer(window_, this);
         glfwSetFramebufferSizeCallback(window_, framebufferResizeCallback);
+        glfwSetKeyCallback(window_, keyCallback);
         glfwSetScrollCallback(window_, scrollCallback);
         glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         glfwGetCursorPos(window_, &previousCursorX_, &previousCursorY_);
@@ -72,9 +73,19 @@ public:
         platform->scrollDeltaY_ += static_cast<float>(yOffset);
     }
 
+    static void keyCallback(GLFWwindow* window, int key, int, int action, int)
+    {
+        auto* platform = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        if (key == GLFW_KEY_C && action == GLFW_RELEASE)
+        {
+            platform->cameraModeToggleRequested_ = true;
+        }
+    }
+
     GLFWwindow* window_ = nullptr;
     bool glfwInitialized_ = false;
     bool framebufferResized_ = false;
+    bool cameraModeToggleRequested_ = false;
     double previousCursorX_ = 0.0;
     double previousCursorY_ = 0.0;
     float scrollDeltaY_ = 0.0f;
@@ -155,6 +166,7 @@ DemoInputState GlfwRendererPlatform::consumeDemoInput()
     input.moveUp = glfwGetKey(impl_->window_, GLFW_KEY_W) == GLFW_PRESS;
     input.moveLeft = glfwGetKey(impl_->window_, GLFW_KEY_A) == GLFW_PRESS;
     input.moveRight = glfwGetKey(impl_->window_, GLFW_KEY_D) == GLFW_PRESS;
+    input.toggleCameraMode = std::exchange(impl_->cameraModeToggleRequested_, false);
     if (glfwGetKey(impl_->window_, GLFW_KEY_ESCAPE) == GLFW_PRESS)
     {
         glfwSetWindowShouldClose(impl_->window_, GLFW_TRUE);

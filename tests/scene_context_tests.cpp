@@ -98,5 +98,17 @@ int main()
     require(translated.minVertex.x > 1.8f && translated.minVertex.y > 2.8f &&
         translated.minVertex.z > 4.0f,
         "scene bounds must follow instance transforms");
+
+    SceneContext movableActorScene;
+    movableActorScene.animationActors_.push_back({nearBounds, glm::mat4(1.0f), true, false});
+    movableActorScene.animatedDraws_.push_back(
+        {{1U, 1U}, 0U, 0U, 0U});
+    movableActorScene.transformData.push_back({glm::mat4(1.0f)});
+    movableActorScene.aabbs.push_back(nearBounds);
+    movableActorScene.setAnimationActorTransform(0,
+        glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 3.0f, 4.0f)));
+    require(movableActorScene.aabbs[0].minVertex.x > 1.8f &&
+            movableActorScene.animationActors_[0].transformDirty,
+        "animation actor movement must relocate culling bounds and request pose publication");
     return EXIT_SUCCESS;
 }

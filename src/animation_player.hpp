@@ -91,6 +91,7 @@ public:
     [[nodiscard]] float playbackSpeed() const noexcept;
     [[nodiscard]] float position() const noexcept;
     [[nodiscard]] float instancePosition(std::size_t instance) const;
+    [[nodiscard]] std::size_t instanceClip(std::size_t instance) const;
     [[nodiscard]] bool instanceEvaluated(std::size_t instance) const;
     [[nodiscard]] std::optional<std::size_t> instanceForNode(
         assets::NodeHandle node) const;

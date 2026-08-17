@@ -12,6 +12,7 @@ struct DemoInputState
     bool moveUp = false;
     bool moveLeft = false;
     bool moveRight = false;
+    bool toggleCameraMode = false;
     float cursorDeltaX = 0.0f;
     float cursorDeltaY = 0.0f;
     float scrollDeltaY = 0.0f;

@@ -15,6 +15,13 @@ set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 set(FASTGLTF_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(FASTGLTF_ENABLE_DOCS OFF CACHE BOOL "" FORCE)
 set(FASTGLTF_COMPILE_AS_CPP20 ON CACHE BOOL "" FORCE)
+set(MINIAUDIO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MINIAUDIO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MINIAUDIO_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(MINIAUDIO_INSTALL OFF CACHE BOOL "" FORCE)
+set(MINIAUDIO_NO_EXTRA_NODES ON CACHE BOOL "" FORCE)
+set(MINIAUDIO_NO_LIBVORBIS ON CACHE BOOL "" FORCE)
+set(MINIAUDIO_NO_LIBOPUS ON CACHE BOOL "" FORCE)
 
 find_package(Vulkan 1.4 REQUIRED)
 
@@ -53,7 +60,14 @@ FetchContent_Declare(
     GIT_TAG v3.3.0
     GIT_SHALLOW TRUE
 )
-FetchContent_MakeAvailable(glfw glm tinyobjloader fastgltf stb vulkan_memory_allocator)
+FetchContent_Declare(
+    miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG 0.11.25
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(
+    glfw glm tinyobjloader fastgltf stb vulkan_memory_allocator miniaudio)
 
 # fastgltf adds /Ob3 on top of CMake's /Ob2 release setting, which produces MSVC D9025.
 # Keep CMake's release inlining policy while retaining fastgltf's other optimization flags.
@@ -192,13 +206,46 @@ else()
     set_source_files_properties(src/vma.cpp PROPERTIES COMPILE_OPTIONS -w)
 endif()
 
+add_library(danvulkan_application STATIC
+    src/application/game_app.cpp
+    src/application/game_app.hpp
+    src/application/game_audio.cpp
+    src/application/game_audio.hpp
+    src/application/game_camera.cpp
+    src/application/game_camera.hpp
+    src/application/game_character.cpp
+    src/application/game_character.hpp
+    src/application/game_world.cpp
+    src/application/game_world.hpp
+    src/application/input_state.hpp
+)
+add_library(DanVulkan::Application ALIAS danvulkan_application)
+target_compile_features(danvulkan_application PUBLIC cxx_std_20)
+target_include_directories(danvulkan_application PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(danvulkan_application PUBLIC DanVulkan::Renderer PRIVATE miniaudio)
+
+if(MSVC)
+    target_compile_options(danvulkan_application PRIVATE /W4 /permissive- /Zc:__cplusplus)
+else()
+    target_compile_options(danvulkan_application PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(DanVulkan src/main.cpp)
-target_link_libraries(DanVulkan PRIVATE DanVulkan::Renderer)
+target_link_libraries(DanVulkan PRIVATE DanVulkan::Application)
 
 set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT DanVulkan)
 set_target_properties(DanVulkan PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(BUILD_TESTING)
+    add_executable(danvulkan_application_tests
+        tests/game_camera_tests.cpp
+        src/application/game_camera.cpp
+        src/application/game_character.cpp
+    )
+    target_include_directories(danvulkan_application_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_features(danvulkan_application_tests PRIVATE cxx_std_20)
+    target_link_libraries(danvulkan_application_tests PRIVATE glm::glm)
     add_executable(danvulkan_asset_tests tests/assets_tests.cpp)
     target_link_libraries(danvulkan_asset_tests PRIVATE DanVulkan::Assets)
     add_executable(danvulkan_animation_tests
@@ -271,6 +318,8 @@ if(BUILD_TESTING)
     target_link_libraries(danvulkan_scene_context_tests PRIVATE
         DanVulkan::Renderer GPUOpen::VulkanMemoryAllocator)
     if(MSVC)
+        target_compile_options(danvulkan_application_tests PRIVATE
+            /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_asset_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_animation_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_device_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
@@ -283,6 +332,7 @@ if(BUILD_TESTING)
         target_compile_options(danvulkan_scene_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_scene_context_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
     else()
+        target_compile_options(danvulkan_application_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_animation_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_device_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
@@ -296,6 +346,7 @@ if(BUILD_TESTING)
         target_compile_options(danvulkan_scene_context_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
+    add_test(NAME danvulkan_application_camera COMMAND danvulkan_application_tests)
     add_test(NAME danvulkan_assets_import COMMAND danvulkan_asset_tests)
     add_test(NAME danvulkan_animation_playback COMMAND danvulkan_animation_tests)
     add_test(NAME danvulkan_device_planning COMMAND danvulkan_device_planner_tests)
@@ -307,6 +358,7 @@ if(BUILD_TESTING)
     add_test(NAME danvulkan_environment_precompute COMMAND danvulkan_environment_precompute_tests)
     add_test(NAME danvulkan_scene_planning COMMAND danvulkan_scene_planner_tests)
     add_test(NAME danvulkan_scene_context COMMAND danvulkan_scene_context_tests)
+    add_test(NAME danvulkan_validation_application COMMAND DanVulkan --application-smoke-test)
     add_test(NAME danvulkan_validation_smoke COMMAND DanVulkan --smoke-test)
     add_test(NAME danvulkan_validation_platform COMMAND DanVulkan --platform-smoke-test)
     add_test(NAME danvulkan_validation_step COMMAND DanVulkan --step-smoke-test)
@@ -314,7 +366,8 @@ if(BUILD_TESTING)
     add_test(NAME danvulkan_validation_minimize COMMAND DanVulkan --minimize-smoke-test)
     add_test(NAME danvulkan_animated_stress COMMAND DanVulkan --animated-stress-test)
     set_tests_properties(
-        danvulkan_assets_import danvulkan_animation_playback danvulkan_device_planning
+        danvulkan_application_camera danvulkan_assets_import danvulkan_animation_playback
+        danvulkan_device_planning
         danvulkan_descriptor_planning
         danvulkan_swapchain_planning
         danvulkan_pipeline_planning
@@ -323,7 +376,8 @@ if(BUILD_TESTING)
         danvulkan_environment_precompute
         danvulkan_scene_planning
         danvulkan_scene_context
-        danvulkan_validation_smoke danvulkan_validation_platform
+        danvulkan_validation_application danvulkan_validation_smoke
+        danvulkan_validation_platform
         danvulkan_validation_step danvulkan_validation_resize danvulkan_validation_minimize
         danvulkan_animated_stress
         PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"

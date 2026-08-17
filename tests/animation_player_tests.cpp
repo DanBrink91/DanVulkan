@@ -169,6 +169,11 @@ int main()
     const danvulkan::assets::NodeHandle matrixRootHandle =
         propagationScene.addNode(std::move(matrixRoot));
     propagationScene.addRootNode(matrixRootHandle);
+    danvulkan::assets::NodeAsset staticSibling;
+    staticSibling.name = "unrelated static root";
+    const danvulkan::assets::NodeHandle staticSiblingHandle =
+        propagationScene.addNode(std::move(staticSibling));
+    propagationScene.addRootNode(staticSiblingHandle);
     danvulkan::assets::AnimationClipAsset propagationClip;
     propagationClip.endTime = 1.0f;
     danvulkan::assets::AnimationChannelAsset propagatedTranslation;
@@ -181,6 +186,11 @@ int main()
     propagationScene.addAnimation(std::move(propagationClip));
 
     danvulkan::AnimationPlayer propagationPlayer(propagationScene);
+    require(propagationPlayer.instanceForNode(cachedTrsHandle) == 0U &&
+        !propagationPlayer.instanceForNode(staticSiblingHandle),
+        "implicit animation ownership leaked into an unrelated static hierarchy");
+    require(propagationPlayer.instanceClip(0) == 0U,
+        "implicit animation actor did not report its selected clip");
     propagationPlayer.update(0.5f);
     const glm::mat4 expectedPropagated = matrixRootLocal *
         glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 0.0f, 0.0f)) *

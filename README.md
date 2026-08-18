@@ -134,21 +134,24 @@ The application demo captures the mouse for first-person look, uses WASD to move
 scrolls forward/backward, toggles between free and ninja-follow cameras when C is released, and
 closes with Escape. In follow mode, WASD instead moves the ninja while the chase camera tracks it.
 F1 toggles the application-owned immediate-mode control and statistics panel; opening it releases
-the pointer and suspends gameplay input. Clicking outside the panel or pressing WASD/C dismisses it
-and immediately returns keyboard and captured-mouse control to gameplay. The wheel scrolls
-overflowing content, Tab and Shift-Tab move keyboard focus, Enter or Space activates the focused
-button/checkbox, and Left/Right adjusts the focused slider. Its initial free-camera position, clip
-planes, and movement speed are
+the pointer and suspends gameplay input. Clicking outside the panel or pressing WASD/C returns
+keyboard and captured-mouse control to gameplay while leaving the panel visible. Tab re-enters UI
+interaction; F1 hides the panel. The wheel scrolls overflowing content, Tab and Shift-Tab move
+keyboard focus, Enter or Space activates the focused button/checkbox, and Left/Right adjusts the
+focused slider. Its initial free-camera position, clip planes, and movement speed are
 derived from `sceneBounds()`, so changing the configured model does not require another hard-coded
 camera pose.
 
-`ImmediateUi` currently provides panels, text, separators, buttons, checkboxes, and float sliders.
-It emits renderer-neutral colored/glyph triangles through `UiDrawData`; `submitUi()` copies those
-triangles into a persistently mapped arena for the current frame and renders them in a single-sample
-overlay pass after scene resolve. The built-in 5x7 shader font keeps the first slice asset-free.
-`GameUi` connects those widgets to background-music volume/mute, animation playback, environment
-lighting, and the existing performance/memory diagnostics. Editable text, nested layout, movable
-or resizable panels, gamepad navigation, and multiple native windows are not yet implemented.
+`ImmediateUi` provides panels, text, separators, buttons, checkboxes, float sliders, persistent
+collapsing headers, and multi-series history plots. It emits renderer-neutral colored/glyph
+triangles through `UiDrawData`; `submitUi()` copies those triangles into a persistently mapped arena
+for the current frame and renders them in a single-sample overlay pass after scene resolve. The
+built-in 5x7 shader font keeps the UI asset-free. `UiInteractionResult` separately reports panel hit
+testing, pointer and keyboard ownership, and active/focused widget IDs so the application does not
+infer capture from panel visibility. `GameUi` retains 120 frame samples even while hidden and graphs
+frame/CPU/GPU timing, animation stages, draw counts, and memory alongside its background-music,
+animation, and lighting controls. Editable text, nested layout, movable or resizable panels,
+gamepad navigation, and multiple native windows are not yet implemented.
 
 Leaving `RendererConfig::platform` null selects the convenient renderer-owned GLFW backend. A host application can instead supply a shared `RendererPlatform` implementation around its existing native window. The adapter provides event pumping, close state, framebuffer extent and resize notification, Vulkan instance extensions, and surface creation without exposing GLFW types. The renderer owns the returned `VkSurfaceKHR`, while native-window and input ownership stay with the adapter/host. An adapter may make `pollEvents()` a no-op when the host pumps events before `beginFrame()`. `makeGlfwRendererPlatform()` exposes the default backend explicitly when desired.
 

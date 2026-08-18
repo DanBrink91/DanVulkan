@@ -49,20 +49,23 @@ void UploadContext::initialize(VkDevice device, VmaAllocator allocator, VkQueue 
     queue_ = queue;
     enableDebugNames_ = enableDebugNames;
 
-    VkCommandPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    auto poolInfo = makeVulkanStructure<VkCommandPoolCreateInfo>(
+        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO);
     poolInfo.queueFamilyIndex = queueFamilyIndex;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     check(vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_),
         "vkCreateCommandPool(upload)");
 
-    VkCommandBufferAllocateInfo allocateInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    auto allocateInfo = makeVulkanStructure<VkCommandBufferAllocateInfo>(
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO);
     allocateInfo.commandPool = commandPool_;
     allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocateInfo.commandBufferCount = 1;
     check(vkAllocateCommandBuffers(device_, &allocateInfo, &commandBuffer_),
         "vkAllocateCommandBuffers(upload)");
 
-    VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    auto fenceInfo = makeVulkanStructure<VkFenceCreateInfo>(
+        VK_STRUCTURE_TYPE_FENCE_CREATE_INFO);
     check(vkCreateFence(device_, &fenceInfo, nullptr, &fence_), "vkCreateFence(upload)");
 
     setDebugName(VK_OBJECT_TYPE_COMMAND_POOL, handleValue(commandPool_), "upload command pool");
@@ -114,7 +117,8 @@ void UploadContext::uploadBuffer(VkBuffer destination, VkDeviceSize destinationO
     copyRegion.size = size;
     vkCmdCopyBuffer(commandBuffer, staging_, destination, 1, &copyRegion);
 
-    VkBufferMemoryBarrier2 barrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+    auto barrier = makeVulkanStructure<VkBufferMemoryBarrier2>(
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2);
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     if ((destinationUsage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) != 0)
@@ -148,7 +152,8 @@ void UploadContext::uploadBuffer(VkBuffer destination, VkDeviceSize destinationO
     barrier.offset = destinationOffset;
     barrier.size = size;
 
-    VkDependencyInfo dependencyInfo{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    auto dependencyInfo = makeVulkanStructure<VkDependencyInfo>(
+        VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
     dependencyInfo.bufferMemoryBarrierCount = 1;
     dependencyInfo.pBufferMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
@@ -284,7 +289,8 @@ void UploadContext::copyBuffer(VkBuffer source, VkBuffer destination, VkDeviceSi
     const VkBufferCopy copyRegion{0, 0, size};
     vkCmdCopyBuffer(commandBuffer, source, destination, 1, &copyRegion);
 
-    VkBufferMemoryBarrier2 barrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+    auto barrier = makeVulkanStructure<VkBufferMemoryBarrier2>(
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2);
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
@@ -314,7 +320,8 @@ void UploadContext::copyBuffer(VkBuffer source, VkBuffer destination, VkDeviceSi
     barrier.buffer = destination;
     barrier.size = size;
 
-    VkDependencyInfo dependencyInfo{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    auto dependencyInfo = makeVulkanStructure<VkDependencyInfo>(
+        VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
     dependencyInfo.bufferMemoryBarrierCount = 1;
     dependencyInfo.pBufferMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
@@ -353,7 +360,8 @@ void UploadContext::ensureStagingCapacity(VkDeviceSize requiredSize, std::string
         throw std::overflow_error("upload staging arena capacity overflowed");
     }
 
-    VkBufferCreateInfo bufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    auto bufferInfo = makeVulkanStructure<VkBufferCreateInfo>(
+        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
     bufferInfo.size = static_cast<VkDeviceSize>(*capacity);
     bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -396,7 +404,8 @@ VkCommandBuffer UploadContext::beginCommands()
     check(vkResetFences(device_, 1, &fence_), "vkResetFences(upload)");
     check(vkResetCommandPool(device_, commandPool_, 0), "vkResetCommandPool(upload)");
 
-    VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    auto beginInfo = makeVulkanStructure<VkCommandBufferBeginInfo>(
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check(vkBeginCommandBuffer(commandBuffer_, &beginInfo), "vkBeginCommandBuffer(upload)");
     return commandBuffer_;
@@ -406,11 +415,11 @@ void UploadContext::submitAndWait(VkCommandBuffer commandBuffer)
 {
     check(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer(upload)");
 
-    VkCommandBufferSubmitInfo commandBufferInfo{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO
-    };
+    auto commandBufferInfo = makeVulkanStructure<VkCommandBufferSubmitInfo>(
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO);
     commandBufferInfo.commandBuffer = commandBuffer;
-    VkSubmitInfo2 submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
+    auto submitInfo = makeVulkanStructure<VkSubmitInfo2>(
+        VK_STRUCTURE_TYPE_SUBMIT_INFO_2);
     submitInfo.commandBufferInfoCount = 1;
     submitInfo.pCommandBufferInfos = &commandBufferInfo;
 
@@ -436,7 +445,8 @@ void UploadContext::setDebugName(VkObjectType objectType, std::uint64_t handle,
     }
 
     const std::string terminatedName(name);
-    VkDebugUtilsObjectNameInfoEXT nameInfo{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    auto nameInfo = makeVulkanStructure<VkDebugUtilsObjectNameInfoEXT>(
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT);
     nameInfo.objectType = objectType;
     nameInfo.objectHandle = handle;
     nameInfo.pObjectName = terminatedName.c_str();
@@ -448,7 +458,8 @@ void UploadContext::transitionImage(VkCommandBuffer commandBuffer, VkImage image
     VkAccessFlags2 sourceAccess, VkPipelineStageFlags2 destinationStage,
     VkAccessFlags2 destinationAccess, std::uint32_t baseMipLevel, std::uint32_t levelCount)
 {
-    VkImageMemoryBarrier2 barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+    auto barrier = makeVulkanStructure<VkImageMemoryBarrier2>(
+        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2);
     barrier.srcStageMask = sourceStage;
     barrier.srcAccessMask = sourceAccess;
     barrier.dstStageMask = destinationStage;
@@ -464,7 +475,8 @@ void UploadContext::transitionImage(VkCommandBuffer commandBuffer, VkImage image
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
 
-    VkDependencyInfo dependencyInfo{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    auto dependencyInfo = makeVulkanStructure<VkDependencyInfo>(
+        VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
     dependencyInfo.imageMemoryBarrierCount = 1;
     dependencyInfo.pImageMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);

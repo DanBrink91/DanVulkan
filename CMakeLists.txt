@@ -120,8 +120,8 @@ target_compile_features(danvulkan_assets PUBLIC cxx_std_20)
 target_include_directories(
     danvulkan_assets
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    SYSTEM PRIVATE "${stb_SOURCE_DIR}"
 )
+target_include_directories(danvulkan_assets SYSTEM PRIVATE "${stb_SOURCE_DIR}")
 target_link_libraries(danvulkan_assets PUBLIC glm::glm PRIVATE tinyobjloader fastgltf::fastgltf)
 
 add_library(danvulkan_renderer STATIC
@@ -204,6 +204,7 @@ target_link_libraries(
     PUBLIC DanVulkan::Assets Vulkan::Vulkan glm::glm
     PRIVATE glfw GPUOpen::VulkanMemoryAllocator
 )
+set_property(TARGET VulkanMemoryAllocator PROPERTY SYSTEM ON)
 add_dependencies(danvulkan_renderer danvulkan_shaders)
 
 if(MSVC)

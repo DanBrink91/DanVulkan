@@ -37,7 +37,8 @@ void setDebugName(VkDevice device, VkObjectType type, Handle handle, const std::
     {
         return;
     }
-    VkDebugUtilsObjectNameInfoEXT info{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    auto info = makeVulkanStructure<VkDebugUtilsObjectNameInfoEXT>(
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT);
     info.objectType = type;
     info.objectHandle = handleValue(handle);
     info.pObjectName = name.c_str();
@@ -67,8 +68,8 @@ void DescriptorContext::initialize(
         throw std::invalid_argument("descriptor context requires a non-zero texture capacity");
     }
 
-    VkDescriptorSetLayoutCreateInfo createInfo{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    auto createInfo = makeVulkanStructure<VkDescriptorSetLayoutCreateInfo>(
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
     createInfo.bindingCount = static_cast<std::uint32_t>(plan->bindings.size());
     createInfo.pBindings = plan->bindings.data();
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
@@ -224,7 +225,8 @@ void DescriptorContext::allocateSets(std::span<const DescriptorSetBindings> bind
         throw std::invalid_argument("descriptor set allocation requires at least one set");
     }
 
-    VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    auto poolInfo = makeVulkanStructure<VkDescriptorPoolCreateInfo>(
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
     poolInfo.poolSizeCount = static_cast<std::uint32_t>(plan->poolSizes.size());
     poolInfo.pPoolSizes = plan->poolSizes.data();
     poolInfo.maxSets = plan->setCount;
@@ -233,7 +235,8 @@ void DescriptorContext::allocateSets(std::span<const DescriptorSetBindings> bind
         "vkCreateDescriptorPool");
 
     std::vector<VkDescriptorSetLayout> layouts(bindings.size(), layout_);
-    VkDescriptorSetAllocateInfo allocateInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    auto allocateInfo = makeVulkanStructure<VkDescriptorSetAllocateInfo>(
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO);
     allocateInfo.descriptorPool = replacementPool;
     allocateInfo.descriptorSetCount = plan->setCount;
     allocateInfo.pSetLayouts = layouts.data();
@@ -281,7 +284,8 @@ void DescriptorContext::updateVertex(std::size_t setIndex, BufferDescriptor vert
 {
     validateBuffer(vertex, "vertex");
     const VkDescriptorBufferInfo bufferInfo{ vertex.buffer, vertex.offset, vertex.range };
-    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    auto write = makeVulkanStructure<VkWriteDescriptorSet>(
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
     write.dstSet = set(setIndex);
     write.dstBinding = bindingIndex(DescriptorBinding::vertex);
     write.descriptorCount = 1;
@@ -304,7 +308,8 @@ void DescriptorContext::updateTextures(std::size_t setIndex,
             throw std::invalid_argument("texture descriptors require a sampler and image view");
         }
     }
-    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    auto write = makeVulkanStructure<VkWriteDescriptorSet>(
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
     write.dstSet = set(setIndex);
     write.dstBinding = bindingIndex(DescriptorBinding::textures);
     write.descriptorCount = static_cast<std::uint32_t>(textures.size());

@@ -35,7 +35,8 @@ void setDebugName(VkDevice device, VkObjectType type, Handle handle, const std::
     {
         return;
     }
-    VkDebugUtilsObjectNameInfoEXT info{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    auto info = makeVulkanStructure<VkDebugUtilsObjectNameInfoEXT>(
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT);
     info.objectType = type;
     info.objectHandle = handleValue(handle);
     info.pObjectName = name.c_str();
@@ -77,7 +78,8 @@ void SwapchainContext::create(const DeviceContext& device, VkSurfaceKHR surface,
         throw std::runtime_error("surface does not provide a usable swapchain configuration");
     }
 
-    VkSwapchainCreateInfoKHR createInfo{ VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
+    auto createInfo = makeVulkanStructure<VkSwapchainCreateInfoKHR>(
+        VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
     createInfo.surface = surface;
     createInfo.minImageCount = plan->imageCount;
     createInfo.imageFormat = plan->surfaceFormat.format;
@@ -114,7 +116,8 @@ void SwapchainContext::create(const DeviceContext& device, VkSurfaceKHR surface,
     {
         for (std::size_t index = 0; index < replacementImages.size(); ++index)
         {
-            VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            auto viewInfo = makeVulkanStructure<VkImageViewCreateInfo>(
+                VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
             viewInfo.image = replacementImages[index];
             viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
             viewInfo.format = plan->surfaceFormat.format;

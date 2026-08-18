@@ -130,15 +130,20 @@ command/synchronization objects are owned by their focused subsystems.
   renderer validation and profiling modes remain isolated harnesses.
 - `GameWorld` is the intended home for scene composition, entity handles, gameplay simulation, animation decisions, lights, and environment controls. `GameCamera` owns view/projection state and a generic follow-target mode; the demo toggles between free flight and a chase view behind the ninja on the release edge of C. WASD navigates the camera in free mode and drives a renderer-independent `GameCharacter` in follow mode. Its per-frame animation-actor offset moves render transforms, skin palettes, and culling bounds together. `InputState`, `GameCamera`, and `GameCharacter` remain renderer-independent, while `GameWorld` depends only on the public renderer boundary.
 - `ImmediateUi` is a renderer-neutral immediate-mode layer with panels, text, separators, buttons,
-  checkboxes, and float sliders. It emits a clipped `UiDrawData` triangle list using a compact
-  shader-rendered 5x7 font. Panels retain bounded wheel-scroll state with a fixed header and
-  scrollbar. Retained focus order supports Tab/Shift-Tab traversal, Enter/Space activation, and
-  Left/Right slider adjustment while keeping widget declaration immediate. `GameUi` builds an
+  checkboxes, float sliders, persistent collapsing headers, and multi-series history plots. It
+  emits a clipped `UiDrawData` triangle list using a compact shader-rendered 5x7 font. Panels retain
+  bounded wheel-scroll state with a fixed header and scrollbar. Retained focus order supports
+  Tab/Shift-Tab traversal, Enter/Space activation, and Left/Right slider adjustment while keeping
+  widget declaration immediate. A first-class `UiInteractionResult` distinguishes visual panel hit
+  testing from pointer/keyboard ownership and exposes active/focused widget IDs. `GameUi` builds an
   application control and diagnostic panel for background audio, animation playback, direct and
-  environment lighting, renderer timing, and memory statistics. It is toggled with F1; GLFW
-  switches between captured and normal cursor modes and gameplay input is suppressed while open.
-  Clicking outside the panel or pressing a gameplay key dismisses the panel, clears retained UI
-  interaction state, and returns cursor capture to the scene.
+  environment lighting, renderer timing, and memory statistics. Its allocation-free 120-sample
+  rings continue recording while hidden and feed collapsible frame/CPU/GPU, animation-stage,
+  draw-count, and memory graphs. It is toggled with F1; GLFW switches between captured and normal
+  cursor modes according to UI ownership. Clicking outside the panel or pressing a gameplay key
+  releases UI interaction and returns cursor capture to the scene while leaving diagnostics
+  visible; clicking the inactive panel or pressing Tab re-enters UI interaction, while F1 controls
+  panel visibility independently.
 - `UiContext` owns a single-sample alpha-blended Vulkan pipeline and one persistently mapped,
   geometrically growing vertex arena per frame in flight. UI renders directly into the resolved
   swapchain image in a load-preserving dynamic-rendering pass, so it remains independent of scene

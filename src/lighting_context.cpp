@@ -129,7 +129,8 @@ void LightingContext::createEnvironmentImage(Image& destination, VkSampler& samp
         throw std::runtime_error("device does not support sampled RGBA32F environment images");
     }
 
-    VkImageCreateInfo imageInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    auto imageInfo = makeVulkanStructure<VkImageCreateInfo>(
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
     imageInfo.extent = {width, height, 1};
     imageInfo.mipLevels = static_cast<std::uint32_t>(levels.size());
@@ -162,7 +163,8 @@ void LightingContext::createEnvironmentImage(Image& destination, VkSampler& samp
     uploads.uploadImageMipChain(destination, uploadLevels, pixels.data(),
         static_cast<VkDeviceSize>(pixels.size_bytes()), name);
 
-    VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    auto viewInfo = makeVulkanStructure<VkImageViewCreateInfo>(
+        VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
     viewInfo.image = destination;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
@@ -175,7 +177,8 @@ void LightingContext::createEnvironmentImage(Image& destination, VkSampler& samp
     destination.setView(view);
     setDebugName(VK_OBJECT_TYPE_IMAGE_VIEW, handleValue(view), name);
 
-    VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    auto samplerInfo = makeVulkanStructure<VkSamplerCreateInfo>(
+        VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
     samplerInfo.magFilter = VK_FILTER_LINEAR;
     samplerInfo.minFilter = VK_FILTER_LINEAR;
     samplerInfo.addressModeU = repeatHorizontally ? VK_SAMPLER_ADDRESS_MODE_REPEAT :
@@ -194,7 +197,8 @@ void LightingContext::createEnvironmentImage(Image& destination, VkSampler& samp
 
 Buffer LightingContext::createLightBuffer(std::size_t index) const
 {
-    VkBufferCreateInfo bufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    auto bufferInfo = makeVulkanStructure<VkBufferCreateInfo>(
+        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
     bufferInfo.size = sizeof(PlannedPointLight) * pointLightCapacity_;
     bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -311,7 +315,8 @@ void LightingContext::setDebugName(VkObjectType type, std::uint64_t handle,
     {
         return;
     }
-    VkDebugUtilsObjectNameInfoEXT info{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    auto info = makeVulkanStructure<VkDebugUtilsObjectNameInfoEXT>(
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT);
     info.objectType = type;
     info.objectHandle = handle;
     info.pObjectName = name;

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -11,6 +13,7 @@
 
 struct UiInputState
 {
+    bool interactionEnabled = true;
     float pointerX = 0.0f;
     float pointerY = 0.0f;
     bool pointerDown = false;
@@ -50,6 +53,23 @@ struct UiDrawData
     std::vector<UiDrawCommand> commands;
 };
 
+struct UiInteractionResult
+{
+    bool pointerOverUi = false;
+    bool wantsPointerInput = false;
+    bool wantsKeyboardInput = false;
+    std::uint64_t activeWidget = 0;
+    std::uint64_t focusedWidget = 0;
+};
+
+struct UiPlotSeries
+{
+    std::span<const float> values;
+    glm::vec4 color{1.0f};
+    // Index of the oldest sample when values stores a wrapped ring buffer.
+    std::size_t firstValue = 0;
+};
+
 // A deliberately small immediate-mode UI. It owns interaction state and emits only
 // renderer-neutral triangles; applications rebuild the widget tree every frame.
 class ImmediateUi
@@ -68,11 +88,17 @@ public:
     [[nodiscard]] bool checkbox(std::string_view label, bool& value);
     [[nodiscard]] bool sliderFloat(std::string_view label, float& value,
         float minimum, float maximum);
+    [[nodiscard]] bool collapsingHeader(std::string_view label, bool defaultOpen = true);
+    void plotLines(std::string_view label, std::span<const UiPlotSeries> series,
+        float minimum = 0.0f, float maximum = 0.0f, float height = 72.0f);
 
     [[nodiscard]] const UiDrawData& endFrame();
     [[nodiscard]] const UiDrawData& drawData() const noexcept { return drawData_; }
-    // Reports whether the current frame's pointer lies over any emitted panel. Applications
-    // can use this to dismiss a modal overlay when the user clicks back into the scene.
+    [[nodiscard]] const UiInteractionResult& interactionResult() const noexcept
+    {
+        return interactionResult_;
+    }
+    // Convenience retained for simple panel hit testing.
     [[nodiscard]] bool pointerOverUi() const noexcept { return pointerOverUi_; }
     void clearInteraction() noexcept;
 
@@ -81,11 +107,14 @@ private:
     [[nodiscard]] bool registerWidget(std::uint64_t id, float height);
     [[nodiscard]] bool hovered(float x, float y, float width, float height) const noexcept;
     void addRect(float x, float y, float width, float height, const glm::vec4& color);
+    void addLine(const glm::vec2& start, const glm::vec2& end, float thickness,
+        const glm::vec4& color);
     void addText(float x, float y, std::string_view value, const glm::vec4& color);
     void advance(float height);
 
     UiInputState input_;
     UiDrawData drawData_;
+    UiInteractionResult interactionResult_;
     float panelX_ = 16.0f;
     float panelY_ = 16.0f;
     float panelWidth_ = 340.0f;
@@ -109,6 +138,12 @@ private:
         float renderedHeight = 0.0f;
     };
     std::vector<PanelState> panelStates_;
+    struct CollapsingState
+    {
+        std::uint64_t id = 0;
+        bool open = true;
+    };
+    std::vector<CollapsingState> collapsingStates_;
     PanelState* panelState_ = nullptr;
     bool panelOpen_ = false;
     bool pointerOverUi_ = false;

@@ -24,6 +24,7 @@ constexpr glm::vec4 mutedColor(0.42f, 0.50f, 0.58f, 1.0f);
 constexpr glm::vec4 accentColor(0.20f, 0.72f, 0.88f, 1.0f);
 constexpr glm::vec4 controlColor(0.10f, 0.13f, 0.17f, 1.0f);
 constexpr glm::vec4 hoverColor(0.15f, 0.22f, 0.29f, 1.0f);
+constexpr glm::vec4 graphGridColor(0.18f, 0.23f, 0.29f, 1.0f);
 constexpr float scrollStep = 32.0f;
 
 std::string_view glyphPattern(char value) noexcept
@@ -137,8 +138,10 @@ void ImmediateUi::beginFrame(const UiInputState& input)
     drawData_.commands.clear();
     panelId_ = 0;
     pointerOverUi_ = false;
+    interactionResult_ = {};
 
-    if (!focusOrder_.empty() && (input_.focusNext || input_.focusPrevious))
+    if (input_.interactionEnabled && !focusOrder_.empty() &&
+        (input_.focusNext || input_.focusPrevious))
     {
         const auto focused = std::find(focusOrder_.begin(), focusOrder_.end(), focusedId_);
         std::size_t index = focused == focusOrder_.end() ? 0U :
@@ -187,7 +190,8 @@ bool ImmediateUi::beginPanel(std::string_view title, float width, float height)
         panelState_->contentHeight - previousVisibleBody + panelPadding, 0.0f);
     const float interactionHeight = panelState_->renderedHeight > 0.0f ?
         std::min(panelState_->renderedHeight, panelHeightLimit_) : panelHeightLimit_;
-    if (input_.pointerX >= panelX_ && input_.pointerX < panelX_ + panelWidth_ &&
+    if (input_.interactionEnabled &&
+        input_.pointerX >= panelX_ && input_.pointerX < panelX_ + panelWidth_ &&
         input_.pointerY >= panelY_ && input_.pointerY < panelY_ + interactionHeight)
     {
         panelState_->scrollOffset = std::clamp(panelState_->scrollOffset -
@@ -382,7 +386,7 @@ bool ImmediateUi::sliderFloat(std::string_view label, float& value,
         focusedId_ = id;
     }
     bool changed = false;
-    if (activeId_ == id && input_.pointerDown)
+    if (input_.interactionEnabled && activeId_ == id && input_.pointerDown)
     {
         const float normalized = std::clamp((input_.pointerX - x) / width, 0.0f, 1.0f);
         const float replacement = minimum + normalized * (maximum - minimum);
@@ -410,6 +414,101 @@ bool ImmediateUi::sliderFloat(std::string_view label, float& value,
     return changed;
 }
 
+bool ImmediateUi::collapsingHeader(std::string_view label, bool defaultOpen)
+{
+    const float x = panelX_ + panelPadding;
+    const float width = panelWidth_ - panelPadding * 2.0f;
+    const std::uint64_t id = widgetId(label);
+    auto state = std::find_if(collapsingStates_.begin(), collapsingStates_.end(),
+        [id](const CollapsingState& candidate) { return candidate.id == id; });
+    if (state == collapsingStates_.end())
+    {
+        collapsingStates_.push_back({id, defaultOpen});
+        state = std::prev(collapsingStates_.end());
+    }
+
+    const bool isFocused = registerWidget(id, rowHeight);
+    const bool isHovered = hovered(x, cursorY_, width, rowHeight);
+    addRect(x, cursorY_, width, rowHeight,
+        isFocused ? accentColor : (isHovered ? hoverColor : controlColor));
+    addText(x + 6.0f, cursorY_ + 3.0f, state->open ? "[-]" : "[+]", textColor);
+    addText(x + 48.0f, cursorY_ + 3.0f, label, textColor);
+    const bool pointerChanged = isHovered && input_.pointerPressed;
+    if (pointerChanged || (isFocused && input_.activateFocused))
+    {
+        state->open = !state->open;
+    }
+    if (pointerChanged)
+    {
+        focusedId_ = id;
+    }
+    advance(rowHeight + 4.0f);
+    return state->open;
+}
+
+void ImmediateUi::plotLines(std::string_view label, std::span<const UiPlotSeries> series,
+    float minimum, float maximum, float height)
+{
+    if (height < 24.0f)
+    {
+        throw std::invalid_argument("ImmediateUi plot height must be at least 24 pixels");
+    }
+    const float x = panelX_ + panelPadding;
+    const float width = panelWidth_ - panelPadding * 2.0f;
+    addText(x, cursorY_ + 2.0f, label, textColor);
+    const float graphY = cursorY_ + rowHeight;
+
+    float resolvedMaximum = maximum;
+    if (!(resolvedMaximum > minimum))
+    {
+        resolvedMaximum = minimum;
+        for (const UiPlotSeries& line : series)
+        {
+            for (const float value : line.values)
+            {
+                if (std::isfinite(value))
+                {
+                    resolvedMaximum = std::max(resolvedMaximum, value);
+                }
+            }
+        }
+        resolvedMaximum = std::max(resolvedMaximum * 1.1f, minimum + 1.0f);
+    }
+
+    addRect(x, graphY, width, height, controlColor);
+    for (int row = 1; row < 4; ++row)
+    {
+        addRect(x, graphY + height * static_cast<float>(row) / 4.0f,
+            width, 1.0f, graphGridColor);
+    }
+    for (const UiPlotSeries& line : series)
+    {
+        if (line.values.size() < 2)
+        {
+            continue;
+        }
+        const std::size_t first = line.firstValue % line.values.size();
+        for (std::size_t sample = 1; sample < line.values.size(); ++sample)
+        {
+            const std::size_t previousIndex = (first + sample - 1U) % line.values.size();
+            const std::size_t currentIndex = (first + sample) % line.values.size();
+            const float previousValue = line.values[previousIndex];
+            const float currentValue = line.values[currentIndex];
+            const float previous = std::isfinite(previousValue) ? std::clamp(
+                (previousValue - minimum) / (resolvedMaximum - minimum), 0.0f, 1.0f) : 0.0f;
+            const float current = std::isfinite(currentValue) ? std::clamp(
+                (currentValue - minimum) / (resolvedMaximum - minimum), 0.0f, 1.0f) : 0.0f;
+            const float previousX = x + width * static_cast<float>(sample - 1U) /
+                static_cast<float>(line.values.size() - 1U);
+            const float currentX = x + width * static_cast<float>(sample) /
+                static_cast<float>(line.values.size() - 1U);
+            addLine({previousX, graphY + height * (1.0f - previous)},
+                {currentX, graphY + height * (1.0f - current)}, 1.5f, line.color);
+        }
+    }
+    advance(rowHeight + height + 6.0f);
+}
+
 const UiDrawData& ImmediateUi::endFrame()
 {
     if (panelOpen_)
@@ -425,6 +524,13 @@ const UiDrawData& ImmediateUi::endFrame()
     {
         focusedId_ = focusOrder_.empty() ? 0 : focusOrder_.front();
     }
+    interactionResult_.pointerOverUi = pointerOverUi_;
+    interactionResult_.wantsPointerInput = input_.interactionEnabled &&
+        (pointerOverUi_ || activeId_ != 0);
+    interactionResult_.wantsKeyboardInput = input_.interactionEnabled &&
+        !focusOrder_.empty();
+    interactionResult_.activeWidget = input_.interactionEnabled ? activeId_ : 0;
+    interactionResult_.focusedWidget = input_.interactionEnabled ? focusedId_ : 0;
     return drawData_;
 }
 
@@ -478,12 +584,13 @@ bool ImmediateUi::registerWidget(std::uint64_t id, float height)
             panelState_->scrollOffset = replacement;
         }
     }
-    return focused;
+    return input_.interactionEnabled && focused;
 }
 
 bool ImmediateUi::hovered(float x, float y, float width, float height) const noexcept
 {
-    return input_.pointerX >= x && input_.pointerX < x + width &&
+    return input_.interactionEnabled &&
+        input_.pointerX >= x && input_.pointerX < x + width &&
         input_.pointerY >= y && input_.pointerY < y + height &&
         (!panelOpen_ || (input_.pointerY >= panelContentStartY_ - panelPadding &&
             input_.pointerY < panelInteractionBottom_));
@@ -498,6 +605,28 @@ void ImmediateUi::addRect(float x, float y, float width, float height,
     }
     addQuad(drawData_.vertices, x, y, width, height, color,
         glm::uvec2(0xffffffffU, 0x7U));
+}
+
+void ImmediateUi::addLine(const glm::vec2& start, const glm::vec2& end, float thickness,
+    const glm::vec4& color)
+{
+    const glm::vec2 direction = end - start;
+    const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y);
+    if (length <= 0.0001f || thickness <= 0.0f)
+    {
+        return;
+    }
+    const glm::vec2 normal(-direction.y / length * thickness * 0.5f,
+        direction.x / length * thickness * 0.5f);
+    const std::array<glm::vec2, 6> positions{{
+        start - normal, start + normal, end + normal,
+        start - normal, end + normal, end - normal
+    }};
+    const glm::uvec2 mask(0xffffffffU, 0x7U);
+    for (const glm::vec2& position : positions)
+    {
+        drawData_.vertices.push_back({position, {0.0f, 0.0f}, color, mask});
+    }
 }
 
 void ImmediateUi::addText(float x, float y, std::string_view value,

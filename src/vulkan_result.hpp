@@ -8,6 +8,14 @@
 
 namespace danvulkan::vk
 {
+template <typename Structure>
+[[nodiscard]] constexpr Structure makeVulkanStructure(VkStructureType structureType) noexcept
+{
+    Structure result{};
+    result.sType = structureType;
+    return result;
+}
+
 inline const char* resultName(VkResult result) noexcept
 {
     switch (result)

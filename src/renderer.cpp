@@ -42,6 +42,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -94,6 +95,7 @@ using danvulkan::vk::Texture;
 using danvulkan::vk::TransformData;
 using danvulkan::vk::TransformDataCount;
 using danvulkan::vk::Vertex;
+using danvulkan::vk::makeVulkanStructure;
 
 struct UniformBufferObject {
     glm::mat4 view;
@@ -1292,11 +1294,9 @@ private:
     std::vector<danvulkan::vk::Buffer> uniformBuffers;
 
     Camera camera;
-    glm::mat4 view;
-
     std::chrono::high_resolution_clock::time_point previousTime = std::chrono::high_resolution_clock::now();
     std::chrono::high_resolution_clock::time_point lastTimeStamp = previousTime;
-    glm::vec3 lightPos, lightSpeed, cameraStart, cameraStop;
+    glm::vec3 lightPos, lightSpeed;
     struct CameraDebugData
     {
         glm::vec3 forward;
@@ -1306,10 +1306,6 @@ private:
 
     std::array<float, 100> frameTimes;
     std::atomic_bool validationErrorSeen_ = false;
-    float averageFrameTime = 0.0f;
-
-    float culmativeDelta = 0.0f;
-
     double frameGpuAvg = 0.0;
     double frameAvg_ = 0.0;
     double frameCpuAvg_ = 0.0;
@@ -1671,7 +1667,8 @@ private:
         frameCpuAvg_ = frameCpuAvg_ * 0.95 + frameCpuMilliseconds * 0.05;
         const double currentFps = frameAvg_ > 0.0 ? 1000.0 / frameAvg_ : 0.0;
         char title[256];
-        sprintf(title, "DanVulkan frame: %.2f ms; cpu: %.2f ms; gpu: %.2f ms; FPS: %.2f",
+        std::snprintf(title, sizeof(title),
+            "DanVulkan frame: %.2f ms; cpu: %.2f ms; gpu: %.2f ms; FPS: %.2f",
             frameAvg_, frameCpuAvg_, frameGpuAvg, currentFps);
         platform_->setWindowTitle(title);
     }
@@ -1847,7 +1844,8 @@ private:
             return;
         }
 
-        VkDebugUtilsMessengerCreateInfoEXT createInfo{ VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
+        auto createInfo = makeVulkanStructure<VkDebugUtilsMessengerCreateInfoEXT>(
+            VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT);
         createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
                                      VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
         createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
@@ -1915,7 +1913,8 @@ private:
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags,
         std::string_view name, std::uint32_t mipLevels = 1)
     {
-        VkImageViewCreateInfo createInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        auto createInfo = makeVulkanStructure<VkImageViewCreateInfo>(
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
         createInfo.image = image;
         createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
         createInfo.format = format;
@@ -2089,7 +2088,8 @@ private:
         VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage,
         VkMemoryPropertyFlags properties, std::string_view name, std::uint32_t mipLevels = 1)
     {
-        VkImageCreateInfo imageInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        auto imageInfo = makeVulkanStructure<VkImageCreateInfo>(
+            VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
         imageInfo.extent.width = width;
         imageInfo.extent.height = height;
@@ -2172,7 +2172,8 @@ private:
     void createTextureSampler(Texture& texture, std::uint32_t textureIndex)
     {
         const VkPhysicalDeviceProperties& properties = device.properties();
-        VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        auto samplerInfo = makeVulkanStructure<VkSamplerCreateInfo>(
+            VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
         samplerInfo.magFilter = textureFilter(texture.samplerConfig.magFilter);
         samplerInfo.minFilter = textureFilter(texture.samplerConfig.minFilter);
         samplerInfo.addressModeU = textureWrap(texture.samplerConfig.wrapU);
@@ -2211,7 +2212,8 @@ private:
         VkPipelineStageFlags2 destinationStage,
         VkAccessFlags2 destinationAccess)
     {
-        VkImageMemoryBarrier2 barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+        auto barrier = makeVulkanStructure<VkImageMemoryBarrier2>(
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2);
         barrier.srcStageMask = sourceStage;
         barrier.srcAccessMask = sourceAccess;
         barrier.dstStageMask = destinationStage;
@@ -2227,7 +2229,8 @@ private:
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount = 1;
 
-        VkDependencyInfo dependencyInfo{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        auto dependencyInfo = makeVulkanStructure<VkDependencyInfo>(
+            VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
         dependencyInfo.imageMemoryBarrierCount = 1;
         dependencyInfo.pImageMemoryBarriers = &barrier;
         vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
@@ -2264,7 +2267,8 @@ private:
             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
-        VkRenderingAttachmentInfo colorAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+        auto colorAttachment = makeVulkanStructure<VkRenderingAttachmentInfo>(
+            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
         colorAttachment.imageView = msaaSamples == VK_SAMPLE_COUNT_1_BIT
             ? swapchain.imageViews()[imageIndex]
             : attachments.colorView(currentFrameIndex);
@@ -2281,14 +2285,16 @@ private:
             colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         }
 
-        VkRenderingAttachmentInfo depthAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+        auto depthAttachment = makeVulkanStructure<VkRenderingAttachmentInfo>(
+            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
         depthAttachment.imageView = attachments.depthView(currentFrameIndex);
         depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         depthAttachment.clearValue.depthStencil = { 1.0f, 0 };
 
-        VkRenderingInfo renderingInfo{ VK_STRUCTURE_TYPE_RENDERING_INFO };
+        auto renderingInfo = makeVulkanStructure<VkRenderingInfo>(
+            VK_STRUCTURE_TYPE_RENDERING_INFO);
         renderingInfo.renderArea = { { 0, 0 }, swapchain.extent() };
         renderingInfo.layerCount = 1;
         renderingInfo.colorAttachmentCount = 1;
@@ -2336,24 +2342,27 @@ private:
         {
             ui_.prepare(currentFrameIndex, pendingUi_.vertices);
 
-            VkMemoryBarrier2 memoryBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            auto memoryBarrier = makeVulkanStructure<VkMemoryBarrier2>(
+                VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
             memoryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             memoryBarrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
             memoryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             memoryBarrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-            VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            auto dependency = makeVulkanStructure<VkDependencyInfo>(
+                VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
             dependency.memoryBarrierCount = 1;
             dependency.pMemoryBarriers = &memoryBarrier;
             vkCmdPipelineBarrier2(commandBuffer, &dependency);
 
-            VkRenderingAttachmentInfo uiAttachment{
-                VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            auto uiAttachment = makeVulkanStructure<VkRenderingAttachmentInfo>(
+                VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
             uiAttachment.imageView = swapchain.imageViews()[imageIndex];
             uiAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             uiAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
             uiAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            VkRenderingInfo uiRendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
+            auto uiRendering = makeVulkanStructure<VkRenderingInfo>(
+                VK_STRUCTURE_TYPE_RENDERING_INFO);
             uiRendering.renderArea = {{0, 0}, swapchain.extent()};
             uiRendering.layerCount = 1;
             uiRendering.colorAttachmentCount = 1;
@@ -2408,19 +2417,23 @@ private:
         commandRecordingCpuAvg_ = rollingAverage(commandRecordingCpuAvg_,
             millisecondsSince(commandRecordingBegin));
 
-        VkSemaphoreSubmitInfo waitInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO };
+        auto waitInfo = makeVulkanStructure<VkSemaphoreSubmitInfo>(
+            VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO);
         waitInfo.semaphore = frame.imageAvailable();
         waitInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 
-        VkCommandBufferSubmitInfo commandBufferInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO };
+        auto commandBufferInfo = makeVulkanStructure<VkCommandBufferSubmitInfo>(
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO);
         commandBufferInfo.commandBuffer = frame.commandBuffer();
 
-        VkSemaphoreSubmitInfo signalInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO };
+        auto signalInfo = makeVulkanStructure<VkSemaphoreSubmitInfo>(
+            VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO);
         const VkSemaphore renderFinished = presentation.renderFinished(imageIndex);
         signalInfo.semaphore = renderFinished;
         signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
 
-        VkSubmitInfo2 submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
+        auto submitInfo = makeVulkanStructure<VkSubmitInfo2>(
+            VK_STRUCTURE_TYPE_SUBMIT_INFO_2);
         submitInfo.waitSemaphoreInfoCount = 1;
         submitInfo.pWaitSemaphoreInfos = &waitInfo;
         submitInfo.commandBufferInfoCount = 1;
@@ -2433,7 +2446,8 @@ private:
                 "vkQueueSubmit2(frame)");
         frame.markSubmitted();
 
-        VkPresentInfoKHR presentInfo = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+        auto presentInfo = makeVulkanStructure<VkPresentInfoKHR>(
+            VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
         presentInfo.waitSemaphoreCount = 1;
         presentInfo.pWaitSemaphores = &renderFinished;
 
@@ -2738,7 +2752,8 @@ private:
         }
 
         const std::string terminatedName(name);
-        VkDebugUtilsObjectNameInfoEXT nameInfo{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+        auto nameInfo = makeVulkanStructure<VkDebugUtilsObjectNameInfoEXT>(
+            VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT);
         nameInfo.objectType = objectType;
         nameInfo.objectHandle = debugHandleValue(handle);
         nameInfo.pObjectName = terminatedName.c_str();
@@ -2748,7 +2763,8 @@ private:
     danvulkan::vk::Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
         VkMemoryPropertyFlags properties, bool persistentlyMapped, std::string_view name)
     {
-        VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        auto bufferInfo = makeVulkanStructure<VkBufferCreateInfo>(
+            VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
         bufferInfo.size = size;
         bufferInfo.usage = usage;
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;

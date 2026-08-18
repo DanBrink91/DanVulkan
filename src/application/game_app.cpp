@@ -79,6 +79,9 @@ void GameApp::run()
                 ui_.toggle();
             }
             const RendererFramebufferExtent extent = platform_->framebufferExtent();
+            const RendererPerformanceStats performance = renderer_->performanceStats();
+            const RendererMemoryStats memory = renderer_->memoryStats();
+            ui_.recordDiagnostics(performance, memory);
             const UiDrawData* uiDrawData = nullptr;
             if (ui_.visible())
             {
@@ -95,20 +98,29 @@ void GameApp::run()
                 uiInput.horizontalNavigation = platformInput.horizontalNavigation;
                 uiInput.viewportWidth = extent.width;
                 uiInput.viewportHeight = extent.height;
-                uiDrawData = &ui_.build(uiInput, renderer_->performanceStats(),
-                    renderer_->memoryStats(), uiControls_);
+                uiDrawData = &ui_.build(uiInput, performance, memory, uiControls_);
 
-                const bool clickedScene = platformInput.pointerPressed &&
-                    !ui_.pointerOverUi();
-                if (clickedScene || platformInput.requestGameplayFocus)
+                const UiInteractionResult interaction = ui_.interactionResult();
+                if (platformInput.requestGameplayFocus ||
+                    (ui_.interactionActive() && platformInput.pointerPressed &&
+                        !interaction.wantsPointerInput))
                 {
-                    ui_.dismiss();
-                    uiDrawData = nullptr;
+                    ui_.releaseInteraction();
+                }
+                else if (!ui_.interactionActive() && platformInput.pointerPressed &&
+                    interaction.pointerOverUi)
+                {
+                    // The first click re-enters UI interaction without accidentally
+                    // activating the widget beneath a captured cursor transition.
+                    ui_.beginInteraction();
                 }
             }
 
-            platform_->setCursorCaptured(!ui_.visible());
-            const bool gameplayInputEnabled = !ui_.visible() && !platformInput.toggleUi;
+            const UiInteractionResult interaction = ui_.interactionResult();
+            platform_->setCursorCaptured(
+                !interaction.wantsPointerInput && !interaction.wantsKeyboardInput);
+            const bool gameplayInputEnabled = !interaction.wantsKeyboardInput &&
+                !platformInput.toggleUi;
             DemoInputState gameplayInput = platformInput;
             if (platformInput.pointerPressed || platformInput.toggleUi)
             {

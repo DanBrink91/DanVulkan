@@ -1,5 +1,6 @@
 #include <danvulkan/ui.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -191,6 +192,135 @@ void panelReportsWhetherPointerIsOverUi()
     static_cast<void>(ui.endFrame());
     require(!ui.pointerOverUi(), "pointer outside every panel should not be captured");
 }
+
+void disabledInteractionStillDrawsWithoutChangingControls()
+{
+    ImmediateUi ui;
+    UiInputState input;
+    input.interactionEnabled = false;
+    input.viewportWidth = 640;
+    input.viewportHeight = 480;
+    input.pointerX = 32.0f;
+    input.pointerY = 62.0f;
+    input.pointerDown = true;
+    input.pointerPressed = true;
+    input.activateFocused = true;
+    bool value = false;
+
+    ui.beginFrame(input);
+    static_cast<void>(ui.beginPanel("INACTIVE"));
+    const bool changed = ui.checkbox("ENABLED", value);
+    ui.endPanel();
+    const UiDrawData& data = ui.endFrame();
+
+    require(!changed && !value, "inactive UI should not consume pointer or keyboard input");
+    require(!data.vertices.empty(), "inactive UI should remain visible");
+    require(ui.pointerOverUi(), "inactive panels should still report their visible bounds");
+    const UiInteractionResult& interaction = ui.interactionResult();
+    require(interaction.pointerOverUi, "inactive UI should retain visual hit testing");
+    require(!interaction.wantsPointerInput && !interaction.wantsKeyboardInput,
+        "inactive UI should not request input ownership");
+    require(interaction.activeWidget == 0 && interaction.focusedWidget == 0,
+        "inactive UI should not expose active interaction IDs");
+}
+
+void interactionResultSeparatesPointerAndKeyboardOwnership()
+{
+    ImmediateUi ui;
+    UiInputState input;
+    input.viewportWidth = 640;
+    input.viewportHeight = 480;
+    input.pointerX = 40.0f;
+    input.pointerY = 64.0f;
+    input.pointerDown = true;
+    input.pointerPressed = true;
+
+    ui.beginFrame(input);
+    static_cast<void>(ui.beginPanel("OWNERSHIP", 220.0f, 120.0f));
+    static_cast<void>(ui.button("ACTIVE"));
+    ui.endPanel();
+    static_cast<void>(ui.endFrame());
+    const UiInteractionResult inside = ui.interactionResult();
+    require(inside.pointerOverUi && inside.wantsPointerInput,
+        "an interactive panel under the pointer should request pointer input");
+    require(inside.wantsKeyboardInput,
+        "an interactive panel with focusable widgets should request keyboard input");
+    require(inside.activeWidget != 0 && inside.focusedWidget != 0,
+        "a pressed button should report active and focused widget IDs");
+
+    input.pointerX = 500.0f;
+    input.pointerY = 300.0f;
+    input.pointerDown = false;
+    input.pointerPressed = false;
+    input.pointerReleased = true;
+    ui.beginFrame(input);
+    static_cast<void>(ui.beginPanel("OWNERSHIP", 220.0f, 120.0f));
+    static_cast<void>(ui.button("ACTIVE"));
+    ui.endPanel();
+    static_cast<void>(ui.endFrame());
+    const UiInteractionResult outside = ui.interactionResult();
+    require(!outside.pointerOverUi && !outside.wantsPointerInput,
+        "a pointer outside an idle panel should remain available to the application");
+    require(outside.wantsKeyboardInput,
+        "keyboard focus should remain owned until the application releases UI interaction");
+}
+
+void collapsingHeadersRetainOpenState()
+{
+    ImmediateUi ui;
+    UiInputState input;
+    input.viewportWidth = 640;
+    input.viewportHeight = 480;
+
+    ui.beginFrame(input);
+    static_cast<void>(ui.beginPanel("SECTIONS"));
+    require(ui.collapsingHeader("DETAILS"), "header should honor its default open state");
+    ui.endPanel();
+    static_cast<void>(ui.endFrame());
+
+    input.pointerX = 40.0f;
+    input.pointerY = 64.0f;
+    input.pointerPressed = true;
+    input.pointerDown = true;
+    ui.beginFrame(input);
+    static_cast<void>(ui.beginPanel("SECTIONS"));
+    require(!ui.collapsingHeader("DETAILS"), "clicking an open header should collapse it");
+    ui.endPanel();
+    static_cast<void>(ui.endFrame());
+
+    input.pointerPressed = false;
+    input.pointerDown = false;
+    input.pointerReleased = true;
+    ui.beginFrame(input);
+    static_cast<void>(ui.beginPanel("SECTIONS"));
+    require(!ui.collapsingHeader("DETAILS", true),
+        "a collapsing header should retain its state across immediate-mode frames");
+    ui.endPanel();
+    static_cast<void>(ui.endFrame());
+}
+
+void plotLinesDrawsFixedHistorySeries()
+{
+    ImmediateUi ui;
+    UiInputState input;
+    input.viewportWidth = 640;
+    input.viewportHeight = 480;
+    const std::array<float, 4> wrappedValues{{3.0f, 4.0f, 1.0f, 2.0f}};
+    const std::array<float, 4> comparison{{1.0f, 2.0f, 3.0f, 4.0f}};
+    const std::array<UiPlotSeries, 2> series{{
+        {wrappedValues, {0.2f, 0.7f, 0.9f, 1.0f}, 2U},
+        {comparison, {0.4f, 0.8f, 0.4f, 1.0f}, 0U}
+    }};
+
+    ui.beginFrame(input);
+    static_cast<void>(ui.beginPanel("PLOTS"));
+    ui.plotLines("HISTORY", series, 0.0f, 4.0f, 60.0f);
+    ui.endPanel();
+    const UiDrawData& data = ui.endFrame();
+    require(data.commands.size() == 1, "a plot should remain inside its panel draw command");
+    require(data.vertices.size() >= 72,
+        "multiple plot series should emit backgrounds, grid lines, and line segments");
+}
 }
 
 int main()
@@ -204,6 +334,10 @@ int main()
         keyboardMovesFocusAndActivatesWidgets();
         keyboardAdjustsFocusedSlider();
         panelReportsWhetherPointerIsOverUi();
+        disabledInteractionStillDrawsWithoutChangingControls();
+        interactionResultSeparatesPointerAndKeyboardOwnership();
+        collapsingHeadersRetainOpenState();
+        plotLinesDrawsFixedHistorySeries();
         std::cout << "UI tests passed\n";
         return EXIT_SUCCESS;
     }

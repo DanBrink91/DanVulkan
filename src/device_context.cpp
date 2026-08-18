@@ -160,21 +160,23 @@ ProbedDevice probeDevice(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface)
             !support.formats.empty() && !support.presentModes.empty();
     }
 
-    VkPhysicalDeviceVulkan11Features vulkan11{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
-    VkPhysicalDeviceVulkan12Features vulkan12{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
-    VkPhysicalDeviceVulkan13Features vulkan13{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+    auto vulkan11 = makeVulkanStructure<VkPhysicalDeviceVulkan11Features>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
+    auto vulkan12 = makeVulkanStructure<VkPhysicalDeviceVulkan12Features>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+    auto vulkan13 = makeVulkanStructure<VkPhysicalDeviceVulkan13Features>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
 #if defined(VK_ENABLE_BETA_EXTENSIONS)
-    VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilitySubset{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR };
+    auto portabilitySubset = makeVulkanStructure<
+        VkPhysicalDevicePortabilitySubsetFeaturesKHR>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR);
     if (result.portabilitySubset)
     {
         vulkan13.pNext = &portabilitySubset;
     }
 #endif
-    VkPhysicalDeviceFeatures2 features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    auto features = makeVulkanStructure<VkPhysicalDeviceFeatures2>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
     features.pNext = &vulkan11;
     vulkan11.pNext = &vulkan12;
     vulkan12.pNext = &vulkan13;
@@ -227,7 +229,8 @@ void setDebugName(VkDevice device, VkObjectType type, Handle handle, const char*
     {
         return;
     }
-    VkDebugUtilsObjectNameInfoEXT info{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    auto info = makeVulkanStructure<VkDebugUtilsObjectNameInfoEXT>(
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT);
     info.objectType = type;
     info.objectHandle = handleValue(handle);
     info.pObjectName = name;
@@ -288,35 +291,38 @@ void DeviceContext::initialize(
     queueInfos.reserve(uniqueFamilies.size());
     for (std::uint32_t family : uniqueFamilies)
     {
-        VkDeviceQueueCreateInfo info{ VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+        auto info = makeVulkanStructure<VkDeviceQueueCreateInfo>(
+            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO);
         info.queueFamilyIndex = family;
         info.queueCount = 1;
         info.pQueuePriorities = &priority;
         queueInfos.push_back(info);
     }
 
-    VkPhysicalDeviceVulkan11Features vulkan11{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+    auto vulkan11 = makeVulkanStructure<VkPhysicalDeviceVulkan11Features>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
     vulkan11.shaderDrawParameters = VK_TRUE;
-    VkPhysicalDeviceVulkan12Features vulkan12{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    auto vulkan12 = makeVulkanStructure<VkPhysicalDeviceVulkan12Features>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
     vulkan12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     vulkan12.runtimeDescriptorArray = VK_TRUE;
-    VkPhysicalDeviceVulkan13Features vulkan13{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+    auto vulkan13 = makeVulkanStructure<VkPhysicalDeviceVulkan13Features>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
     vulkan13.shaderDemoteToHelperInvocation = VK_TRUE;
     vulkan13.synchronization2 = VK_TRUE;
     vulkan13.dynamicRendering = VK_TRUE;
 #if defined(VK_ENABLE_BETA_EXTENSIONS)
-    VkPhysicalDevicePortabilitySubsetFeaturesKHR portabilitySubset{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR };
+    auto portabilitySubset = makeVulkanStructure<
+        VkPhysicalDevicePortabilitySubsetFeaturesKHR>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR);
     if (probed[*selected].portabilitySubset)
     {
         portabilitySubset.samplerMipLodBias = samplerMipLodBiasSupported_ ? VK_TRUE : VK_FALSE;
         vulkan13.pNext = &portabilitySubset;
     }
 #endif
-    VkPhysicalDeviceFeatures2 features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    auto features = makeVulkanStructure<VkPhysicalDeviceFeatures2>(
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
     features.features.samplerAnisotropy = VK_TRUE;
     features.features.sampleRateShading = VK_TRUE;
     features.features.multiDrawIndirect = VK_TRUE;
@@ -325,7 +331,8 @@ void DeviceContext::initialize(
     vulkan11.pNext = &vulkan12;
     vulkan12.pNext = &vulkan13;
 
-    VkDeviceCreateInfo createInfo{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+    auto createInfo = makeVulkanStructure<VkDeviceCreateInfo>(
+        VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
     createInfo.pNext = &features;
     createInfo.queueCreateInfoCount = static_cast<std::uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();

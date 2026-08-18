@@ -73,12 +73,43 @@ public:
         platform->scrollDeltaY_ += static_cast<float>(yOffset);
     }
 
-    static void keyCallback(GLFWwindow* window, int key, int, int action, int)
+    static void keyCallback(GLFWwindow* window, int key, int, int action, int mods)
     {
         auto* platform = static_cast<Impl*>(glfwGetWindowUserPointer(window));
         if (key == GLFW_KEY_C && action == GLFW_RELEASE)
         {
             platform->cameraModeToggleRequested_ = true;
+            platform->gameplayFocusRequested_ = true;
+        }
+        if (key == GLFW_KEY_F1 && action == GLFW_RELEASE)
+        {
+            platform->uiToggleRequested_ = true;
+        }
+        if (key == GLFW_KEY_TAB && action == GLFW_PRESS)
+        {
+            if ((mods & GLFW_MOD_SHIFT) != 0)
+            {
+                platform->focusPreviousRequested_ = true;
+            }
+            else
+            {
+                platform->focusNextRequested_ = true;
+            }
+        }
+        if ((key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER || key == GLFW_KEY_SPACE) &&
+            action == GLFW_PRESS)
+        {
+            platform->activateFocusedRequested_ = true;
+        }
+        if ((key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT) &&
+            (action == GLFW_PRESS || action == GLFW_REPEAT))
+        {
+            platform->horizontalNavigation_ += key == GLFW_KEY_LEFT ? -1 : 1;
+        }
+        if ((key == GLFW_KEY_W || key == GLFW_KEY_A || key == GLFW_KEY_S ||
+                key == GLFW_KEY_D) && action == GLFW_PRESS)
+        {
+            platform->gameplayFocusRequested_ = true;
         }
     }
 
@@ -86,6 +117,14 @@ public:
     bool glfwInitialized_ = false;
     bool framebufferResized_ = false;
     bool cameraModeToggleRequested_ = false;
+    bool uiToggleRequested_ = false;
+    bool gameplayFocusRequested_ = false;
+    bool pointerDown_ = false;
+    bool cursorCaptured_ = true;
+    bool focusNextRequested_ = false;
+    bool focusPreviousRequested_ = false;
+    bool activateFocusedRequested_ = false;
+    int horizontalNavigation_ = 0;
     double previousCursorX_ = 0.0;
     double previousCursorY_ = 0.0;
     float scrollDeltaY_ = 0.0f;
@@ -167,6 +206,8 @@ DemoInputState GlfwRendererPlatform::consumeDemoInput()
     input.moveLeft = glfwGetKey(impl_->window_, GLFW_KEY_A) == GLFW_PRESS;
     input.moveRight = glfwGetKey(impl_->window_, GLFW_KEY_D) == GLFW_PRESS;
     input.toggleCameraMode = std::exchange(impl_->cameraModeToggleRequested_, false);
+    input.toggleUi = std::exchange(impl_->uiToggleRequested_, false);
+    input.requestGameplayFocus = std::exchange(impl_->gameplayFocusRequested_, false);
     if (glfwGetKey(impl_->window_, GLFW_KEY_ESCAPE) == GLFW_PRESS)
     {
         glfwSetWindowShouldClose(impl_->window_, GLFW_TRUE);
@@ -175,13 +216,45 @@ DemoInputState GlfwRendererPlatform::consumeDemoInput()
     double cursorX = 0.0;
     double cursorY = 0.0;
     glfwGetCursorPos(impl_->window_, &cursorX, &cursorY);
+    int windowWidth = 0;
+    int windowHeight = 0;
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    glfwGetWindowSize(impl_->window_, &windowWidth, &windowHeight);
+    glfwGetFramebufferSize(impl_->window_, &framebufferWidth, &framebufferHeight);
+    input.pointerX = static_cast<float>(cursorX) *
+        (windowWidth > 0 ? static_cast<float>(framebufferWidth) / windowWidth : 1.0f);
+    input.pointerY = static_cast<float>(cursorY) *
+        (windowHeight > 0 ? static_cast<float>(framebufferHeight) / windowHeight : 1.0f);
+    const bool pointerDown =
+        glfwGetMouseButton(impl_->window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    input.pointerDown = pointerDown;
+    input.pointerPressed = pointerDown && !impl_->pointerDown_;
+    input.pointerReleased = !pointerDown && impl_->pointerDown_;
+    impl_->pointerDown_ = pointerDown;
     input.cursorDeltaX = static_cast<float>(cursorX - impl_->previousCursorX_);
     // This camera stores a view-space pitch: moving the pointer upward must decrease it.
     input.cursorDeltaY = static_cast<float>(cursorY - impl_->previousCursorY_);
     impl_->previousCursorX_ = cursorX;
     impl_->previousCursorY_ = cursorY;
     input.scrollDeltaY = std::exchange(impl_->scrollDeltaY_, 0.0f);
+    input.focusNext = std::exchange(impl_->focusNextRequested_, false);
+    input.focusPrevious = std::exchange(impl_->focusPreviousRequested_, false);
+    input.activateFocused = std::exchange(impl_->activateFocusedRequested_, false);
+    input.horizontalNavigation = std::exchange(impl_->horizontalNavigation_, 0);
     return input;
+}
+
+void GlfwRendererPlatform::setCursorCaptured(bool captured)
+{
+    if (impl_->cursorCaptured_ == captured)
+    {
+        return;
+    }
+    impl_->cursorCaptured_ = captured;
+    glfwSetInputMode(impl_->window_, GLFW_CURSOR,
+        captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    glfwGetCursorPos(impl_->window_, &impl_->previousCursorX_, &impl_->previousCursorY_);
 }
 
 std::shared_ptr<RendererPlatform> makeGlfwRendererPlatform(std::string_view title,

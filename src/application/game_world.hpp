@@ -22,6 +22,8 @@ public:
         std::uint32_t viewportHeight);
     void update(const InputState& input, float deltaSeconds, std::uint32_t viewportWidth,
         std::uint32_t viewportHeight);
+    void setEnvironment(const SceneEnvironment& environment) noexcept;
+    void setKeyLightIntensity(float intensity) noexcept;
 
     [[nodiscard]] const SceneSubmission& sceneSubmission() const noexcept
     {

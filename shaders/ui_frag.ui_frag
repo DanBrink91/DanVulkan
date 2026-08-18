@@ -1,0 +1,20 @@
+#version 460
+
+layout(location = 0) in vec2 inGlyphUv;
+layout(location = 1) in vec4 inColor;
+layout(location = 2) flat in uvec2 inGlyphMask;
+
+layout(location = 0) out vec4 outColor;
+
+void main()
+{
+    uvec2 cell = min(uvec2(inGlyphUv * vec2(5.0, 7.0)), uvec2(4, 6));
+    uint bitIndex = cell.y * 5 + cell.x;
+    uint word = bitIndex < 32 ? inGlyphMask.x : inGlyphMask.y;
+    uint wordBit = bitIndex < 32 ? bitIndex : bitIndex - 32;
+    if ((word & (1u << wordBit)) == 0u)
+    {
+        discard;
+    }
+    outColor = inColor;
+}

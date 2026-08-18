@@ -87,13 +87,19 @@ find_program(
 
 set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 set(SHADER_OUTPUTS)
-foreach(SHADER_NAME IN ITEMS vert frag)
+foreach(SHADER_NAME IN ITEMS vert frag ui_vert ui_frag)
     set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${SHADER_NAME}.${SHADER_NAME}")
     set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
+    if(SHADER_NAME MATCHES "vert$")
+        set(SHADER_STAGE vert)
+    else()
+        set(SHADER_STAGE frag)
+    endif()
     add_custom_command(
         OUTPUT "${SHADER_OUTPUT}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHADER_OUTPUT_DIR}"
-        COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.4 "${SHADER_SOURCE}" -o "${SHADER_OUTPUT}"
+        COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.4
+            -fshader-stage=${SHADER_STAGE} "${SHADER_SOURCE}" -o "${SHADER_OUTPUT}"
         DEPENDS "${SHADER_SOURCE}"
         COMMENT "Compiling ${SHADER_NAME} shader for Vulkan 1.4"
         VERBATIM
@@ -160,12 +166,16 @@ add_library(danvulkan_renderer STATIC
     src/swapchain_planner.hpp
     src/upload_context.cpp
     src/upload_context.hpp
+    src/ui.cpp
+    src/ui_context.cpp
+    src/ui_context.hpp
     src/vma.cpp
     src/vulkan_raii.hpp
     src/vulkan_result.hpp
     camera.hpp
     include/danvulkan/platform.hpp
     include/danvulkan/renderer.hpp
+    include/danvulkan/ui.hpp
 )
 add_library(DanVulkan::Renderer ALIAS danvulkan_renderer)
 
@@ -215,6 +225,8 @@ add_library(danvulkan_application STATIC
     src/application/game_camera.hpp
     src/application/game_character.cpp
     src/application/game_character.hpp
+    src/application/game_ui.cpp
+    src/application/game_ui.hpp
     src/application/game_world.cpp
     src/application/game_world.hpp
     src/application/input_state.hpp
@@ -246,6 +258,11 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_features(danvulkan_application_tests PRIVATE cxx_std_20)
     target_link_libraries(danvulkan_application_tests PRIVATE glm::glm)
+    add_executable(danvulkan_ui_tests tests/ui_tests.cpp src/ui.cpp)
+    target_compile_features(danvulkan_ui_tests PRIVATE cxx_std_20)
+    target_include_directories(danvulkan_ui_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(danvulkan_ui_tests PRIVATE glm::glm)
     add_executable(danvulkan_asset_tests tests/assets_tests.cpp)
     target_link_libraries(danvulkan_asset_tests PRIVATE DanVulkan::Assets)
     add_executable(danvulkan_animation_tests
@@ -318,6 +335,7 @@ if(BUILD_TESTING)
     target_link_libraries(danvulkan_scene_context_tests PRIVATE
         DanVulkan::Renderer GPUOpen::VulkanMemoryAllocator)
     if(MSVC)
+        target_compile_options(danvulkan_ui_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_application_tests PRIVATE
             /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_asset_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
@@ -332,6 +350,7 @@ if(BUILD_TESTING)
         target_compile_options(danvulkan_scene_planner_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
         target_compile_options(danvulkan_scene_context_tests PRIVATE /W4 /permissive- /Zc:__cplusplus)
     else()
+        target_compile_options(danvulkan_ui_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_application_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(danvulkan_animation_tests PRIVATE -Wall -Wextra -Wpedantic)
@@ -347,6 +366,7 @@ if(BUILD_TESTING)
     endif()
 
     add_test(NAME danvulkan_application_camera COMMAND danvulkan_application_tests)
+    add_test(NAME danvulkan_ui COMMAND danvulkan_ui_tests)
     add_test(NAME danvulkan_assets_import COMMAND danvulkan_asset_tests)
     add_test(NAME danvulkan_animation_playback COMMAND danvulkan_animation_tests)
     add_test(NAME danvulkan_device_planning COMMAND danvulkan_device_planner_tests)
@@ -366,7 +386,7 @@ if(BUILD_TESTING)
     add_test(NAME danvulkan_validation_minimize COMMAND DanVulkan --minimize-smoke-test)
     add_test(NAME danvulkan_animated_stress COMMAND DanVulkan --animated-stress-test)
     set_tests_properties(
-        danvulkan_application_camera danvulkan_assets_import danvulkan_animation_playback
+        danvulkan_application_camera danvulkan_ui danvulkan_assets_import danvulkan_animation_playback
         danvulkan_device_planning
         danvulkan_descriptor_planning
         danvulkan_swapchain_planning

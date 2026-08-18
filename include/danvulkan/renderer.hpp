@@ -2,6 +2,7 @@
 
 #include <danvulkan/assets.hpp>
 #include <danvulkan/platform.hpp>
+#include <danvulkan/ui.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -422,6 +423,9 @@ public:
     [[nodiscard]] bool shouldClose() const noexcept;
     [[nodiscard]] bool beginFrame();
     void submitScene(const SceneSubmission& submission);
+    // UI triangles are copied into renderer-owned frame scratch. Submission is optional and
+    // renders as a single-sample overlay after scene resolve, independent of scene MSAA.
+    void submitUi(const UiDrawData& drawData);
     void endFrame();
 
     // Resource handles stay valid for the current uploaded scene until their resource is

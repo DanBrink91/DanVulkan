@@ -18,6 +18,11 @@ public:
 
     void playBackgroundMusic(const std::filesystem::path& path);
     void stopBackgroundMusic() noexcept;
+    void setBackgroundMusicVolume(float volume);
+    void setBackgroundMusicMuted(bool muted) noexcept;
+    [[nodiscard]] float backgroundMusicVolume() const noexcept;
+    [[nodiscard]] bool backgroundMusicMuted() const noexcept;
+    [[nodiscard]] bool backgroundMusicActive() const noexcept;
 
 private:
     struct Impl;

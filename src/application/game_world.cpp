@@ -78,6 +78,19 @@ void GameWorld::update(const InputState& input, float deltaSeconds,
     updateCameraSubmission();
 }
 
+void GameWorld::setEnvironment(const SceneEnvironment& environment) noexcept
+{
+    submission_.environment = environment;
+}
+
+void GameWorld::setKeyLightIntensity(float intensity) noexcept
+{
+    if (!submission_.pointLights.empty())
+    {
+        submission_.pointLights.front().intensity = intensity;
+    }
+}
+
 void GameWorld::updateCameraSubmission()
 {
     submission_.view = camera_.view();

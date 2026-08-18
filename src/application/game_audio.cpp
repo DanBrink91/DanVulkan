@@ -1,5 +1,7 @@
 #include "game_audio.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -14,6 +16,8 @@ struct GameAudio::Impl
     ma_sound backgroundMusic{};
     bool engineInitialized = false;
     bool musicInitialized = false;
+    float volume = 1.0f;
+    bool muted = false;
 };
 
 namespace {
@@ -54,6 +58,7 @@ void GameAudio::playBackgroundMusic(const std::filesystem::path& path)
         throw audioError("could not load background music " + nativePath, result);
     }
     impl_->musicInitialized = true;
+    ma_sound_set_volume(&impl_->backgroundMusic, impl_->muted ? 0.0f : impl_->volume);
 
     result = ma_sound_start(&impl_->backgroundMusic);
     if (result != MA_SUCCESS)
@@ -61,6 +66,43 @@ void GameAudio::playBackgroundMusic(const std::filesystem::path& path)
         stopBackgroundMusic();
         throw audioError("could not start background music", result);
     }
+}
+
+void GameAudio::setBackgroundMusicVolume(float volume)
+{
+    if (!std::isfinite(volume))
+    {
+        throw std::invalid_argument("background music volume must be finite");
+    }
+    impl_->volume = std::clamp(volume, 0.0f, 1.0f);
+    if (impl_->musicInitialized && !impl_->muted)
+    {
+        ma_sound_set_volume(&impl_->backgroundMusic, impl_->volume);
+    }
+}
+
+void GameAudio::setBackgroundMusicMuted(bool muted) noexcept
+{
+    impl_->muted = muted;
+    if (impl_->musicInitialized)
+    {
+        ma_sound_set_volume(&impl_->backgroundMusic, muted ? 0.0f : impl_->volume);
+    }
+}
+
+float GameAudio::backgroundMusicVolume() const noexcept
+{
+    return impl_->volume;
+}
+
+bool GameAudio::backgroundMusicMuted() const noexcept
+{
+    return impl_->muted;
+}
+
+bool GameAudio::backgroundMusicActive() const noexcept
+{
+    return impl_->musicInitialized;
 }
 
 void GameAudio::stopBackgroundMusic() noexcept

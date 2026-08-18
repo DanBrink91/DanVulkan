@@ -28,6 +28,7 @@
 #include "scene_planner.hpp"
 #include "swapchain_context.hpp"
 #include "upload_context.hpp"
+#include "ui_context.hpp"
 #include "vulkan_raii.hpp"
 #include "vulkan_result.hpp"
 
@@ -259,6 +260,9 @@ public:
         animationPreviousTime_ = animationTime;
 
         hasPendingSubmission_ = false;
+        pendingUi_.vertices.clear();
+        pendingUi_.commands.clear();
+        hasPendingUi_ = false;
         frameInProgress_ = true;
         return true;
     }
@@ -272,6 +276,17 @@ public:
         }
         pendingSubmission_ = submission;
         hasPendingSubmission_ = true;
+    }
+
+    void submitUi(const UiDrawData& drawData)
+    {
+        requireFrameInProgress("submitUi");
+        if (hasPendingUi_)
+        {
+            throw std::logic_error("submitUi may only be called once per frame");
+        }
+        pendingUi_ = drawData;
+        hasPendingUi_ = true;
     }
 
     void endFrame()
@@ -293,11 +308,13 @@ public:
             updateWindowTitle();
             ++renderedFrames_;
             hasPendingSubmission_ = false;
+            hasPendingUi_ = false;
             frameInProgress_ = false;
         }
         catch (...)
         {
             hasPendingSubmission_ = false;
+            hasPendingUi_ = false;
             frameInProgress_ = false;
             throw;
         }
@@ -1215,10 +1232,12 @@ private:
     std::chrono::steady_clock::time_point animationPreviousTime_{};
     float animationDeltaSeconds_ = 0.0f;
     SceneSubmission pendingSubmission_;
+    UiDrawData pendingUi_;
     SceneSubmission demoSubmission_;
     std::vector<std::uint8_t> submittedAnimationActorScratch_;
     danvulkan::LightingPlan lightingPlan_;
     bool hasPendingSubmission_ = false;
+    bool hasPendingUi_ = false;
 
     // Declared before all dependent Vulkan resources so they are destroyed last.
     danvulkan::vk::Instance instance;
@@ -1231,6 +1250,7 @@ private:
     danvulkan::vk::PresentationContext presentation;
     danvulkan::vk::DescriptorContext descriptors;
     danvulkan::vk::PipelineContext pipelines;
+    danvulkan::vk::UiContext ui_;
     // Declared after the device and allocator so scene and lighting resources retire first.
     danvulkan::vk::SceneContext scene_;
     danvulkan::vk::LightingContext lighting_;
@@ -1387,6 +1407,7 @@ private:
         lightingPlan_.pointLights.reserve(config_.maxPointLights);
         createDescriptorSetLayout();
         createGraphicsPipeline();
+        createUiContext();
         createSwapchainAttachments();
         createTextureImageViews();
         createTextureSamplers();
@@ -1428,6 +1449,13 @@ private:
         camera.updateAspectRatio(
             swapchain.extent().width / static_cast<float>(swapchain.extent().height));
         createGraphicsPipeline();
+        if (!ui_.compatible(swapchain.format()))
+        {
+            ui_.rebuild(swapchain.format(),
+                std::filesystem::path(COMPILED_SHADER_PATH) / "ui_vert.spv",
+                std::filesystem::path(COMPILED_SHADER_PATH) / "ui_frag.spv",
+                enableValidationLayers);
+        }
         recreateSwapchainAttachments();
         return true;
     }
@@ -1666,6 +1694,7 @@ private:
 
         frameInProgress_ = false;
         hasPendingSubmission_ = false;
+        hasPendingUi_ = false;
         vkDeviceWaitIdle(device);
         cleanup();
         initialized_ = false;
@@ -1682,6 +1711,7 @@ private:
     {
         lastMemoryStats_ = memoryStats();
         cleanupSwapChain();
+        ui_.reset();
         pipelines.reset();
         descriptors.reset();
         uniformBuffers.clear();
@@ -1706,6 +1736,10 @@ private:
     {
         vkDeviceWaitIdle(device); // don't touch resources that may still be in use
         pipelines.rebuild(pipelineCreateInfo());
+        ui_.rebuild(swapchain.format(),
+            std::filesystem::path(COMPILED_SHADER_PATH) / "ui_vert.spv",
+            std::filesystem::path(COMPILED_SHADER_PATH) / "ui_frag.spv",
+            enableValidationLayers);
     }
 
     void createInstance()
@@ -1928,6 +1962,17 @@ private:
         {
             pipelines.rebuild(createInfo);
         }
+    }
+
+    void createUiContext()
+    {
+        danvulkan::vk::UiContextCreateInfo createInfo;
+        createInfo.colorFormat = swapchain.format();
+        createInfo.vertexShader = std::filesystem::path(COMPILED_SHADER_PATH) / "ui_vert.spv";
+        createInfo.fragmentShader = std::filesystem::path(COMPILED_SHADER_PATH) / "ui_frag.spv";
+        createInfo.frameCount = frames.size();
+        createInfo.enableDebugNames = enableValidationLayers;
+        ui_.initialize(device, allocator, createInfo);
     }
 
     void createFrameContexts()
@@ -2286,6 +2331,37 @@ private:
                 batch.commandCount, sizeof(VkDrawIndexedIndirectCommand));
         }
         vkCmdEndRendering(commandBuffer);
+
+        if (hasPendingUi_ && !pendingUi_.vertices.empty() && !pendingUi_.commands.empty())
+        {
+            ui_.prepare(currentFrameIndex, pendingUi_.vertices);
+
+            VkMemoryBarrier2 memoryBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            memoryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            memoryBarrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            memoryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            memoryBarrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dependency.memoryBarrierCount = 1;
+            dependency.pMemoryBarriers = &memoryBarrier;
+            vkCmdPipelineBarrier2(commandBuffer, &dependency);
+
+            VkRenderingAttachmentInfo uiAttachment{
+                VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            uiAttachment.imageView = swapchain.imageViews()[imageIndex];
+            uiAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            uiAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            uiAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo uiRendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
+            uiRendering.renderArea = {{0, 0}, swapchain.extent()};
+            uiRendering.layerCount = 1;
+            uiRendering.colorAttachmentCount = 1;
+            uiRendering.pColorAttachments = &uiAttachment;
+            vkCmdBeginRendering(commandBuffer, &uiRendering);
+            ui_.record(commandBuffer, currentFrameIndex, pendingUi_, swapchain.extent());
+            vkCmdEndRendering(commandBuffer);
+        }
 
         transitionImage(commandBuffer, swapchain.images()[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -3263,16 +3339,18 @@ private:
     void shaderFileChanged(std::filesystem::path shaderSourceFile)
     {
         std::string filePath = shaderSourceFile.string();
+        const bool vertexStage = shaderSourceFile.stem().string().ends_with("vert");
+        const std::string stage = vertexStage ? "vert" : "frag";
         const std::filesystem::path compiledPath = std::filesystem::path(COMPILED_SHADER_PATH) /
             (shaderSourceFile.stem().string() + ".spv");
         std::array<char, 128> buffer;
         std::string result;
 #ifdef _WIN32
-        const std::string cmd = "glslc.exe --target-env=vulkan1.4 \"" + filePath +
+        const std::string cmd = "glslc.exe --target-env=vulkan1.4 -fshader-stage=" + stage + " \"" + filePath +
             "\" -o \"" + compiledPath.string() + "\" 2>&1";
         std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd.c_str(), "r"), _pclose);
 #else
-        const std::string cmd = "glslc --target-env=vulkan1.4 \"" + filePath +
+        const std::string cmd = "glslc --target-env=vulkan1.4 -fshader-stage=" + stage + " \"" + filePath +
             "\" -o \"" + compiledPath.string() + "\" 2>&1";
         std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
 #endif
@@ -3374,6 +3452,11 @@ bool VulkanRenderer::beginFrame()
 void VulkanRenderer::submitScene(const SceneSubmission& submission)
 {
     impl_->submitScene(submission);
+}
+
+void VulkanRenderer::submitUi(const UiDrawData& drawData)
+{
+    impl_->submitUi(drawData);
 }
 
 void VulkanRenderer::endFrame()

@@ -13,8 +13,19 @@ struct DemoInputState
     bool moveLeft = false;
     bool moveRight = false;
     bool toggleCameraMode = false;
+    bool toggleUi = false;
+    bool requestGameplayFocus = false;
+    bool pointerDown = false;
+    bool pointerPressed = false;
+    bool pointerReleased = false;
+    bool focusNext = false;
+    bool focusPrevious = false;
+    bool activateFocused = false;
+    int horizontalNavigation = 0;
     float cursorDeltaX = 0.0f;
     float cursorDeltaY = 0.0f;
+    float pointerX = 0.0f;
+    float pointerY = 0.0f;
     float scrollDeltaY = 0.0f;
 };
 
@@ -40,6 +51,7 @@ public:
         std::uint32_t height) override;
 
     [[nodiscard]] DemoInputState consumeDemoInput();
+    void setCursorCaptured(bool captured);
 
 private:
     class Impl;

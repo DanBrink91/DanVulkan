@@ -352,8 +352,10 @@ int main(int argc, char** argv)
         if (applicationDriven)
         {
             const bool enableBackgroundMusic = argc == 1;
+            const bool showUiInitially = argc > 1 &&
+                std::string_view(argv[1]) == "--application-smoke-test";
             danvulkan::application::GameApp application(
-                std::move(config), enableBackgroundMusic);
+                std::move(config), enableBackgroundMusic, showUiInitially);
             application.run();
             return EXIT_SUCCESS;
         }

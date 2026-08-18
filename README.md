@@ -53,9 +53,10 @@ Use `cmake --preset macos-release` followed by `cmake --build --preset macos-rel
 
 The executable's application-facing code lives in `src/application/`. `GameApp` owns the window,
 input translation, clock, main loop, and `GameAudio` lifetime; `GameWorld` owns demo/gameplay state
-and creates each `SceneSubmission`; `GameCamera` owns navigation and camera matrices. These are the
-primary files to extend when building a demo or gameplay feature. The normal no-argument launch uses
-this layer, while command-line validation and profiling modes stay isolated in `main.cpp`.
+and creates each `SceneSubmission`; `GameCamera` owns navigation and camera matrices; and `GameUi`
+builds the debug overlay. These are the primary files to extend when building a demo or gameplay
+feature. The normal no-argument launch uses this layer, while command-line validation and profiling
+modes stay isolated in `main.cpp`.
 
 Reusable hosts include `<danvulkan/renderer.hpp>`, create a `RendererConfig`, and own a `VulkanRenderer`. The public header hides Vulkan and windowing implementation details behind a private implementation. Applications can either use the compatibility `run()` loop or own the loop through `initialize()`, `beginFrame()`, `submitScene()`, `endFrame()`, and `shutdown()`:
 
@@ -129,7 +130,25 @@ propagation plan, with allocation-free per-instance subtree ranges. Pose-driven 
 directly into parent space, while static TRS and affine matrix locals reuse a cached matrix;
 arbitrary matrix-authored locals retain the general multiplication path.
 
-The application demo captures the mouse for first-person look, uses WASD to move the free camera, scrolls forward/backward, toggles between free and ninja-follow cameras when C is released, and closes with Escape. In follow mode, WASD instead moves the ninja while the chase camera tracks it. Its initial free-camera position, clip planes, and movement speed are derived from `sceneBounds()`, so changing the configured model does not require another hard-coded camera pose.
+The application demo captures the mouse for first-person look, uses WASD to move the free camera,
+scrolls forward/backward, toggles between free and ninja-follow cameras when C is released, and
+closes with Escape. In follow mode, WASD instead moves the ninja while the chase camera tracks it.
+F1 toggles the application-owned immediate-mode control and statistics panel; opening it releases
+the pointer and suspends gameplay input. Clicking outside the panel or pressing WASD/C dismisses it
+and immediately returns keyboard and captured-mouse control to gameplay. The wheel scrolls
+overflowing content, Tab and Shift-Tab move keyboard focus, Enter or Space activates the focused
+button/checkbox, and Left/Right adjusts the focused slider. Its initial free-camera position, clip
+planes, and movement speed are
+derived from `sceneBounds()`, so changing the configured model does not require another hard-coded
+camera pose.
+
+`ImmediateUi` currently provides panels, text, separators, buttons, checkboxes, and float sliders.
+It emits renderer-neutral colored/glyph triangles through `UiDrawData`; `submitUi()` copies those
+triangles into a persistently mapped arena for the current frame and renders them in a single-sample
+overlay pass after scene resolve. The built-in 5x7 shader font keeps the first slice asset-free.
+`GameUi` connects those widgets to background-music volume/mute, animation playback, environment
+lighting, and the existing performance/memory diagnostics. Editable text, nested layout, movable
+or resizable panels, gamepad navigation, and multiple native windows are not yet implemented.
 
 Leaving `RendererConfig::platform` null selects the convenient renderer-owned GLFW backend. A host application can instead supply a shared `RendererPlatform` implementation around its existing native window. The adapter provides event pumping, close state, framebuffer extent and resize notification, Vulkan instance extensions, and surface creation without exposing GLFW types. The renderer owns the returned `VkSurfaceKHR`, while native-window and input ownership stay with the adapter/host. An adapter may make `pollEvents()` a no-op when the host pumps events before `beginFrame()`. `makeGlfwRendererPlatform()` exposes the default backend explicitly when desired.
 

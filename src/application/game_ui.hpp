@@ -21,6 +21,7 @@ struct GameUiControls
     float animationSpeed = 1.0f;
     bool restartAnimationRequested = false;
     SceneEnvironment environment;
+    SceneAtmosphere atmosphere;
     float keyLightIntensity = 25.0f;
 };
 

@@ -5,11 +5,22 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
 {
     mat4 view;
     mat4 projection;
+    mat4 inverseViewProjection;
+    mat4 directionalShadowViewProjection;
     vec4 cameraPositionTime;
     vec4 vegetationInteractorPositionRadius;
     uvec4 lightingCounts;
     vec4 environmentTintIntensity;
     vec4 environmentControls;
+    vec4 atmosphereSkyZenithIntensity;
+    vec4 atmosphereSkyHorizonExponent;
+    vec4 atmosphereFogColorDensity;
+    vec4 atmosphereFogParameters;
+    vec4 atmosphereScatteringParameters;
+    vec4 directionalLightData[8];
+    vec4 atmosphereCloudShapeParameters;
+    vec4 atmosphereCloudMovementParameters;
+    vec4 atmosphereCloudLightingParameters;
 } ubo;
 
 // Grass shares the ordinary vertex storage allocation, but consumes it as raw 32-bit words.
@@ -270,7 +281,11 @@ void main()
     vec3 worldNormal = normalize(normalMatrix * normal);
     vec3 worldTangent = normalize(mat3(model) * derivative);
 
+#ifdef DANVULKAN_SHADOW_PASS
+    gl_Position = ubo.directionalShadowViewProjection * worldPosition;
+#else
     gl_Position = ubo.projection * ubo.view * worldPosition;
+#endif
     outTexCoord = vec2(sideSign * 0.5 + 0.5, t);
     outMaterialIndex = draw.materialIndex;
     outWorldNormal = worldNormal;

@@ -54,6 +54,7 @@ assets::TextureAsset defaultEnvironment()
 void LightingContext::initialize(const DeviceContext& device, VmaAllocator allocator,
     UploadContext& uploads, const assets::TextureAsset* environment,
     std::uint32_t pointLightCapacity, std::size_t imageCount,
+    std::uint32_t shadowResolution,
     bool enableDebugNames)
 {
     if (device_ != VK_NULL_HANDLE)
@@ -61,14 +62,46 @@ void LightingContext::initialize(const DeviceContext& device, VmaAllocator alloc
         throw std::logic_error("lighting context is already initialized");
     }
     if (!device || allocator == VK_NULL_HANDLE || pointLightCapacity == 0 ||
-        pointLightCapacity > MaxScenePointLights || imageCount == 0)
+        pointLightCapacity > MaxScenePointLights || imageCount == 0 ||
+        shadowResolution < 256U)
     {
         throw std::invalid_argument("lighting context received invalid configuration");
     }
-    physicalDevice_ = device.physicalDevice();
+    const VkPhysicalDevice physicalDevice = device.physicalDevice();
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+    if (shadowResolution > properties.limits.maxImageDimension2D)
+    {
+        throw std::invalid_argument("directional shadow resolution exceeds device limits");
+    }
+    // The short player-centered volume gets enough precision from D16 while using half the
+    // device memory of D32. Fall back when a device cannot sample D16 depth.
+    constexpr std::array shadowFormats{
+        VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT};
+    VkFormat shadowFormat = VK_FORMAT_UNDEFINED;
+    for (const VkFormat candidate : shadowFormats)
+    {
+        VkFormatProperties formatProperties{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, candidate, &formatProperties);
+        constexpr VkFormatFeatureFlags required =
+            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((formatProperties.optimalTilingFeatures & required) == required)
+        {
+            shadowFormat = candidate;
+            break;
+        }
+    }
+    if (shadowFormat == VK_FORMAT_UNDEFINED)
+    {
+        throw std::runtime_error("device has no sampled directional-shadow depth format");
+    }
+    physicalDevice_ = physicalDevice;
     device_ = device;
     allocator_ = allocator;
     pointLightCapacity_ = pointLightCapacity;
+    shadowResolution_ = shadowResolution;
+    shadowFormat_ = shadowFormat;
     enableDebugNames_ = enableDebugNames;
     try
     {
@@ -232,6 +265,86 @@ void LightingContext::recreateBuffers(std::size_t imageCount)
         replacement.push_back(createLightBuffer(index));
     }
     lightBuffers_ = std::move(replacement);
+    createShadowImages(imageCount);
+}
+
+Image LightingContext::createShadowImage(std::size_t index) const
+{
+    auto imageInfo = makeVulkanStructure<VkImageCreateInfo>(
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent = {shadowResolution_, shadowResolution_, 1};
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = shadowFormat_;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+        VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+    VmaAllocationCreateInfo allocationInfo{};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    allocationInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    check(vmaCreateImage(allocator_, &imageInfo, &allocationInfo,
+        &image, &allocation, nullptr), "vmaCreateImage(directional shadow)");
+    Image result(device_, allocator_, image, allocation);
+    const std::string name = "directional shadow image " + std::to_string(index);
+    vmaSetAllocationName(allocator_, allocation, name.c_str());
+    setDebugName(VK_OBJECT_TYPE_IMAGE, handleValue(image), name.c_str());
+
+    auto viewInfo = makeVulkanStructure<VkImageViewCreateInfo>(
+        VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
+    viewInfo.image = image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = shadowFormat_;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.layerCount = 1;
+    VkImageView view = VK_NULL_HANDLE;
+    check(vkCreateImageView(device_, &viewInfo, nullptr, &view),
+        "vkCreateImageView(directional shadow)");
+    result.setView(view);
+    setDebugName(VK_OBJECT_TYPE_IMAGE_VIEW, handleValue(view), name.c_str());
+    return result;
+}
+
+void LightingContext::createShadowImages(std::size_t imageCount)
+{
+    std::vector<Image> replacement;
+    replacement.reserve(imageCount);
+    for (std::size_t index = 0; index < imageCount; ++index)
+    {
+        replacement.push_back(createShadowImage(index));
+    }
+
+    if (shadowSampler_ == VK_NULL_HANDLE)
+    {
+        VkFormatProperties formatProperties{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice_, shadowFormat_, &formatProperties);
+        const bool linear = (formatProperties.optimalTilingFeatures &
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+        auto samplerInfo = makeVulkanStructure<VkSamplerCreateInfo>(
+            VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
+        samplerInfo.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        samplerInfo.minFilter = samplerInfo.magFilter;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        samplerInfo.compareEnable = VK_TRUE;
+        samplerInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        check(vkCreateSampler(device_, &samplerInfo, nullptr, &shadowSampler_),
+            "vkCreateSampler(directional shadow)");
+        setDebugName(VK_OBJECT_TYPE_SAMPLER, handleValue(shadowSampler_),
+            "directional shadow sampler");
+    }
+    shadowImages_ = std::move(replacement);
+    shadowInitialized_.assign(imageCount, false);
 }
 
 void LightingContext::writePointLights(std::size_t imageIndex,
@@ -264,18 +377,58 @@ BufferDescriptor LightingContext::lightBuffer(std::size_t imageIndex) const
     return {lightBuffers_[imageIndex], 0, lightBuffers_[imageIndex].size()};
 }
 
-std::array<VkDescriptorImageInfo, 3> LightingContext::environmentDescriptors() const noexcept
+std::array<VkDescriptorImageInfo, 4> LightingContext::lightingDescriptors(
+    std::size_t imageIndex) const
 {
+    if (imageIndex >= shadowImages_.size())
+    {
+        throw std::out_of_range("directional shadow descriptor index is out of range");
+    }
     return {{
         {irradianceSampler_, irradianceImage_.view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         {specularSampler_, specularImage_.view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {brdfSampler_, brdfImage_.view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+        {brdfSampler_, brdfImage_.view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {shadowSampler_, shadowImages_[imageIndex].view(),
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}
     }};
+}
+
+const Image& LightingContext::shadowImage(std::size_t imageIndex) const
+{
+    if (imageIndex >= shadowImages_.size())
+    {
+        throw std::out_of_range("directional shadow image index is out of range");
+    }
+    return shadowImages_[imageIndex];
+}
+
+VkImageView LightingContext::shadowView(std::size_t imageIndex) const
+{
+    return shadowImage(imageIndex).view();
+}
+
+bool LightingContext::shadowInitialized(std::size_t imageIndex) const
+{
+    if (imageIndex >= shadowInitialized_.size())
+    {
+        throw std::out_of_range("directional shadow state index is out of range");
+    }
+    return shadowInitialized_[imageIndex];
+}
+
+void LightingContext::markShadowInitialized(std::size_t imageIndex)
+{
+    if (imageIndex >= shadowInitialized_.size())
+    {
+        throw std::out_of_range("directional shadow state index is out of range");
+    }
+    shadowInitialized_[imageIndex] = true;
 }
 
 void LightingContext::reset() noexcept
 {
     lightBuffers_.clear();
+    shadowImages_.clear();
     if (irradianceSampler_ != VK_NULL_HANDLE)
     {
         vkDestroySampler(device_, irradianceSampler_, nullptr);
@@ -288,14 +441,22 @@ void LightingContext::reset() noexcept
     {
         vkDestroySampler(device_, brdfSampler_, nullptr);
     }
+    if (shadowSampler_ != VK_NULL_HANDLE)
+    {
+        vkDestroySampler(device_, shadowSampler_, nullptr);
+    }
     irradianceSampler_ = VK_NULL_HANDLE;
     specularSampler_ = VK_NULL_HANDLE;
     brdfSampler_ = VK_NULL_HANDLE;
+    shadowSampler_ = VK_NULL_HANDLE;
     irradianceImage_.reset();
     specularImage_.reset();
     brdfImage_.reset();
     environmentMipLevels_ = 1;
     pointLightCapacity_ = 0;
+    shadowResolution_ = 0;
+    shadowFormat_ = VK_FORMAT_UNDEFINED;
+    shadowInitialized_.clear();
     allocator_ = VK_NULL_HANDLE;
     physicalDevice_ = VK_NULL_HANDLE;
     device_ = VK_NULL_HANDLE;

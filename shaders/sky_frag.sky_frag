@@ -1,0 +1,264 @@
+#version 460
+
+struct DirectionalLightData
+{
+    vec4 directionIntensity;
+    vec4 colorShadow;
+};
+
+layout(set = 0, binding = 0) uniform UniformBufferObject
+{
+    mat4 view;
+    mat4 projection;
+    mat4 inverseViewProjection;
+    mat4 directionalShadowViewProjection;
+    vec4 cameraPositionTime;
+    vec4 vegetationInteractorPositionRadius;
+    uvec4 lightingCounts;
+    vec4 environmentTintIntensity;
+    vec4 environmentControls;
+    vec4 atmosphereSkyZenithIntensity;
+    vec4 atmosphereSkyHorizonExponent;
+    vec4 atmosphereFogColorDensity;
+    vec4 atmosphereFogParameters;
+    vec4 atmosphereScatteringParameters;
+    DirectionalLightData directionalLights[4];
+    vec4 atmosphereCloudShapeParameters;
+    vec4 atmosphereCloudMovementParameters;
+    vec4 atmosphereCloudLightingParameters;
+} ubo;
+
+layout(set = 0, binding = 11) uniform sampler2DShadow directionalShadowMap;
+
+layout(location = 0) in vec2 inNdc;
+layout(location = 0) out vec4 outColor;
+
+float hash21(vec2 point)
+{
+    vec3 p = fract(vec3(point.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float valueNoise(vec2 point)
+{
+    vec2 cell = floor(point);
+    vec2 local = fract(point);
+    vec2 blend = local * local * (3.0 - 2.0 * local);
+    float top = mix(hash21(cell), hash21(cell + vec2(1.0, 0.0)), blend.x);
+    float bottom = mix(hash21(cell + vec2(0.0, 1.0)),
+        hash21(cell + vec2(1.0, 1.0)), blend.x);
+    return mix(top, bottom, blend.y);
+}
+
+float cloudLayerDensity(vec2 worldPosition, float scaleMultiplier,
+    float coverageBias, vec2 layerOffset)
+{
+    float coverage = clamp(ubo.atmosphereCloudShapeParameters.x + coverageBias, 0.0, 1.0);
+    float density = ubo.atmosphereCloudShapeParameters.y;
+    if (coverage <= 0.001 || density <= 0.001)
+    {
+        return 0.0;
+    }
+
+    vec2 windOffset = ubo.atmosphereCloudMovementParameters.xy *
+        ubo.cameraPositionTime.w * ubo.atmosphereCloudMovementParameters.z;
+    vec2 point = (worldPosition - windOffset) *
+        ubo.atmosphereCloudShapeParameters.z * scaleMultiplier + layerOffset;
+    float field = valueNoise(point) * 0.57;
+    field += valueNoise(point * 2.03 + vec2(13.7, -8.2)) * 0.29;
+    field += valueNoise(point * 4.11 + vec2(-4.3, 19.6)) * 0.14;
+    float threshold = 1.0 - coverage;
+    float softness = ubo.atmosphereCloudShapeParameters.w;
+    float shape = smoothstep(threshold - softness, threshold + softness, field);
+    return clamp(shape * density, 0.0, 1.0);
+}
+
+float combinedCloudDensity(vec2 lowerPosition, vec2 upperPosition)
+{
+    float lower = cloudLayerDensity(lowerPosition, 1.0, 0.0, vec2(0.0));
+    float upper = cloudLayerDensity(upperPosition, 1.63, -0.14, vec2(31.7, -17.2));
+    return 1.0 - (1.0 - lower) * (1.0 - upper * 0.72);
+}
+
+float cloudDensityAlongView(vec3 origin, vec3 direction)
+{
+    float horizonFade = smoothstep(0.012, 0.095, direction.y);
+    if (horizonFade <= 0.0)
+    {
+        return 0.0;
+    }
+    float altitude = ubo.atmosphereCloudMovementParameters.w;
+    float separation = ubo.atmosphereCloudLightingParameters.w;
+    float lowerDistance = max((altitude - origin.y) / max(direction.y, 0.012), 0.0);
+    float upperDistance = max((altitude + separation - origin.y) /
+        max(direction.y, 0.012), 0.0);
+    return combinedCloudDensity(origin.xz + direction.xz * lowerDistance,
+        origin.xz + direction.xz * upperDistance) * horizonFade;
+}
+
+float cloudSunTransmission(vec3 worldPosition, vec3 towardSun)
+{
+    float altitude = ubo.atmosphereCloudMovementParameters.w;
+    float separation = ubo.atmosphereCloudLightingParameters.w;
+    float verticalDirection = max(towardSun.y, 0.06);
+    float lowerDistance = max((altitude - worldPosition.y) / verticalDirection, 0.0);
+    float upperDistance = max((altitude + separation - worldPosition.y) /
+        verticalDirection, 0.0);
+    float cloudDensity = combinedCloudDensity(
+        worldPosition.xz + towardSun.xz * lowerDistance,
+        worldPosition.xz + towardSun.xz * upperDistance);
+    return exp(-cloudDensity * 4.8);
+}
+
+float shadowVisibility(vec3 worldPosition, out bool insideShadowVolume)
+{
+    vec4 clip = ubo.directionalShadowViewProjection * vec4(worldPosition, 1.0);
+    vec3 projected = clip.xyz / max(clip.w, 0.00001);
+    vec2 uv = projected.xy * 0.5 + 0.5;
+    insideShadowVolume = projected.z > 0.0 && projected.z < 1.0 &&
+        all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
+    if (!insideShadowVolume)
+    {
+        return 1.0;
+    }
+    return texture(directionalShadowMap, vec3(uv, projected.z - 0.00018));
+}
+
+vec3 integrateOpenAir(vec3 background, vec3 viewDirection)
+{
+    const int RayMarchSteps = 4;
+    float marchDistance = ubo.atmosphereScatteringParameters.y;
+    float stepLength = marchDistance / float(RayMarchSteps);
+    float jitter = hash21(gl_FragCoord.xy + vec2(ubo.cameraPositionTime.w * 0.013));
+    float transmittance = 1.0;
+    vec3 accumulatedFog = vec3(0.0);
+    vec3 accumulatedSun = vec3(0.0);
+
+    bool hasShadowSun = ubo.lightingCounts.z > 0U;
+    DirectionalLightData sun;
+    vec3 sunRadiance = vec3(0.0);
+    float phase = 0.0;
+    if (hasShadowSun)
+    {
+        sun = ubo.directionalLights[ubo.lightingCounts.z - 1U];
+        sunRadiance = sun.colorShadow.rgb * sun.directionIntensity.w;
+        vec3 lightTravelDirection = normalize(sun.directionIntensity.xyz);
+        float scatteringCosine = clamp(
+            dot(lightTravelDirection, -viewDirection), -1.0, 1.0);
+        const float anisotropy = 0.58;
+        float phaseDenominator = 1.0 + anisotropy * anisotropy -
+            2.0 * anisotropy * scatteringCosine;
+        phase = (1.0 - anisotropy * anisotropy) /
+            (12.5663706144 * pow(max(phaseDenominator, 0.001), 1.5));
+    }
+    float cloudTransmission = 1.0;
+    if (hasShadowSun)
+    {
+        cloudTransmission = cloudSunTransmission(ubo.cameraPositionTime.xyz +
+            viewDirection * (marchDistance * 0.5),
+            normalize(-sun.directionIntensity.xyz));
+    }
+
+    for (int step = 0; step < RayMarchSteps; ++step)
+    {
+        float alongRay = (float(step) + 0.22 + jitter * 0.25) * stepLength;
+        vec3 samplePosition = ubo.cameraPositionTime.xyz + viewDirection * alongRay;
+        float heightDensity = exp(clamp(
+            -(samplePosition.y - ubo.atmosphereFogParameters.x) *
+                ubo.atmosphereFogParameters.y, -7.0, 7.0));
+        float slowTime = ubo.cameraPositionTime.w * 0.018;
+        float bankSignal = 0.5 + 0.25 * (
+            sin(samplePosition.x * 2.2 - 3.159 + slowTime) +
+            sin(samplePosition.z * 1.7 + 6.416 - slowTime * 0.72));
+        float mistBank = smoothstep(0.52, 0.82, bankSignal);
+        float bankDensity = mix(0.42, 5.0, mistBank);
+        float densityVariation = mix(1.0, bankDensity,
+            ubo.atmosphereFogParameters.w);
+        float extinction = ubo.atmosphereFogColorDensity.w *
+            heightDensity * densityVariation;
+        float sampleOpacity = min(1.0 - exp(-extinction * stepLength),
+            ubo.atmosphereFogParameters.z);
+
+        accumulatedFog += ubo.atmosphereFogColorDensity.rgb *
+            transmittance * sampleOpacity;
+        if (hasShadowSun && ubo.atmosphereScatteringParameters.x > 0.0)
+        {
+            bool insideShadowVolume = false;
+            float visibility = shadowVisibility(samplePosition, insideShadowVolume);
+            if (insideShadowVolume)
+            {
+                accumulatedSun += sunRadiance * phase *
+                    pow(visibility, 1.35) * cloudTransmission *
+                    transmittance * sampleOpacity *
+                    ubo.atmosphereScatteringParameters.x;
+            }
+        }
+        transmittance *= 1.0 - sampleOpacity;
+    }
+    return background * transmittance + accumulatedFog + accumulatedSun;
+}
+
+void main()
+{
+    vec4 farWorld = ubo.inverseViewProjection * vec4(inNdc, 1.0, 1.0);
+    vec3 viewDirection = normalize(
+        farWorld.xyz / max(abs(farWorld.w), 0.00001) - ubo.cameraPositionTime.xyz);
+
+    float elevation = clamp(viewDirection.y * 0.5 + 0.5, 0.0, 1.0);
+    float skyBlend = pow(elevation, ubo.atmosphereSkyHorizonExponent.w);
+    vec3 sky = mix(ubo.atmosphereSkyHorizonExponent.rgb,
+        ubo.atmosphereSkyZenithIntensity.rgb, skyBlend);
+
+    // Keep the lower hemisphere atmospheric rather than exposing a hard horizon when terrain
+    // briefly leaves the view during streaming or steep camera motion.
+    float belowHorizon = 1.0 - smoothstep(-0.35, 0.08, viewDirection.y);
+    sky = mix(sky, ubo.atmosphereFogColorDensity.rgb * 0.42, belowHorizon);
+    sky *= ubo.atmosphereSkyZenithIntensity.w;
+
+    float viewCloudDensity = cloudDensityAlongView(
+        ubo.cameraPositionTime.xyz, viewDirection);
+
+    if (ubo.lightingCounts.y > 0U)
+    {
+        DirectionalLightData sun = ubo.directionalLights[0];
+        vec3 towardSun = normalize(-sun.directionIntensity.xyz);
+        float sunElevation = clamp(towardSun.y, 0.0, 1.0);
+        float cloudSunExposure = cloudSunTransmission(
+            ubo.cameraPositionTime.xyz + viewDirection * 6.0, towardSun);
+        float cloudEdge = 4.0 * viewCloudDensity * (1.0 - viewCloudDensity);
+        vec3 cloudAmbient = mix(vec3(0.31, 0.36, 0.41), vec3(0.88, 0.92, 0.94),
+            0.42 + sunElevation * 0.38);
+        vec3 cloudLight = sun.colorShadow.rgb *
+            (0.13 * cloudSunExposure + cloudEdge * cloudSunExposure *
+                ubo.atmosphereCloudLightingParameters.y * 0.34);
+        vec3 cloudColor = (cloudAmbient + cloudLight) *
+            ubo.atmosphereCloudLightingParameters.z;
+        sky = mix(sky, cloudColor, viewCloudDensity);
+
+        float alignment = clamp(dot(viewDirection, towardSun), 0.0, 1.0);
+        float angularRadius = ubo.atmosphereScatteringParameters.z;
+        float disc = smoothstep(cos(angularRadius * 1.35),
+            cos(angularRadius * 0.72), alignment);
+        float innerHalo = pow(alignment, 420.0);
+        float outerHalo = pow(alignment, 36.0);
+        vec3 sunRadiance = sun.colorShadow.rgb * sun.directionIntensity.w;
+        float sunCloudTransmission = exp(-viewCloudDensity * 6.2);
+        sky += sunRadiance * ubo.atmosphereScatteringParameters.w *
+            (disc * 3.8 * sunCloudTransmission +
+                innerHalo * 0.55 * mix(0.18, 1.0, sunCloudTransmission) +
+                outerHalo * 0.055 * mix(0.52, 1.0, sunCloudTransmission));
+    }
+    else
+    {
+        vec3 cloudColor = vec3(0.72, 0.76, 0.79) *
+            ubo.atmosphereCloudLightingParameters.z;
+        sky = mix(sky, cloudColor, viewCloudDensity);
+    }
+
+    sky = integrateOpenAir(sky, viewDirection);
+
+    // Match the material shader's compact filmic mapping.
+    sky = sky / (sky + vec3(1.0));
+    outColor = vec4(sky, 1.0);
+}

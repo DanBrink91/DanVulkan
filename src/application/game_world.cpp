@@ -41,7 +41,9 @@ constexpr std::uint32_t streamedIndexCapacity = 4250000U;
 // and leave enough depth behind the bind-pose bounds for the running animation.
 constexpr glm::vec3 ninjaFollowTargetOffset(0.1f, 2.0f, -4.0f);
 constexpr float ninjaFollowDistance = 8.0f;
-constexpr float ninjaFollowHeight = 1.6f;
+// Keep the default view nearly level so the forest canopy, horizon, and sun remain visible above
+// the character instead of placing almost the entire upper half of the frame below the horizon.
+constexpr float ninjaFollowHeight = 0.6f;
 constexpr float ninjaGrassInteractionRadius = 0.045f;
 
 std::uint32_t chunkSeed(std::int32_t x, std::int32_t z) noexcept
@@ -211,11 +213,24 @@ GameWorld::GameWorld()
     surfaceField_ = std::make_shared<ProceduralTerrainSurfaceField>(surfaceConfig);
     submission_.environment = {
         {0.95f, 1.0f, 1.08f}, 0.45f, 0.0f, 1.25f, 0.8f};
+    submission_.atmosphere = {
+        {0.045f, 0.19f, 0.48f}, 1.28f,
+        {0.62f, 0.76f, 0.82f}, 0.64f,
+        {0.36f, 0.47f, 0.43f}, 0.22f,
+        0.015f, 4.5f, 0.82f, 0.85f,
+        2.2f, 5.5f, 0.018f, 1.75f,
+        0.58f, 1.2f, 0.065f, 0.13f,
+        {1.0f, 0.28f}, 0.16f, 14.0f,
+        0.52f, 1.25f, 1.08f, 3.5f};
+    submission_.directionalLights = {
+        // The default camera faces +Z. A low sun ahead and slightly left is visible through the
+        // trees and gives the volumetric phase function a strong forward-scattering angle.
+        {{0.22f, -0.40f, -1.0f}, 4.4f, {1.0f, 0.88f, 0.68f},
+            true, 3.2f, 8.0f}
+    };
     submission_.pointLights = {
-        {{ninjaPosition.x - 0.35f, ninjaPosition.y + 0.55f, ninjaPosition.z + 0.25f},
-            2.0f, {1.0f, 0.86f, 0.68f}, 3.5f},
         {{ninjaPosition.x + 0.4f, ninjaPosition.y + 0.25f, ninjaPosition.z - 0.3f},
-            1.5f, {0.48f, 0.68f, 1.0f}, 0.8f}
+            1.5f, {0.48f, 0.68f, 1.0f}, 0.65f}
     };
 }
 
@@ -362,11 +377,9 @@ void GameWorld::update(const InputState& input, float deltaSeconds,
         ninja_.controlForward(), ninjaFollowDistance * ninjaScale,
         ninjaFollowHeight * ninjaScale);
     camera_.update(input, deltaSeconds);
-    if (submission_.pointLights.size() >= 2U)
+    if (!submission_.pointLights.empty())
     {
         submission_.pointLights[0].position = ninja_.position() +
-            glm::vec3(-0.35f, 0.55f, 0.25f);
-        submission_.pointLights[1].position = ninja_.position() +
             glm::vec3(0.4f, 0.25f, -0.3f);
     }
     updateCameraSubmission();
@@ -736,11 +749,16 @@ void GameWorld::setEnvironment(const SceneEnvironment& environment) noexcept
     submission_.environment = environment;
 }
 
+void GameWorld::setAtmosphere(const SceneAtmosphere& atmosphere) noexcept
+{
+    submission_.atmosphere = atmosphere;
+}
+
 void GameWorld::setKeyLightIntensity(float intensity) noexcept
 {
-    if (!submission_.pointLights.empty())
+    if (!submission_.directionalLights.empty())
     {
-        submission_.pointLights.front().intensity = intensity;
+        submission_.directionalLights.front().intensity = intensity;
     }
 }
 

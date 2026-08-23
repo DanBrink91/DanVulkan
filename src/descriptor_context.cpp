@@ -105,7 +105,7 @@ void DescriptorContext::validateBuffer(BufferDescriptor buffer, const char* role
 void DescriptorContext::writeSet(VkDescriptorSet set,
     const DescriptorSetBindings& bindings,
     std::span<const VkDescriptorImageInfo> textures,
-    std::span<const VkDescriptorImageInfo> environment) const
+    const std::array<VkDescriptorImageInfo, 4>& lighting) const
 {
     validateBuffer(bindings.uniform, "uniform");
     validateBuffer(bindings.material, "material");
@@ -125,11 +125,7 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
             throw std::invalid_argument("texture descriptors require a sampler and image view");
         }
     }
-    if (environment.size() != 3)
-    {
-        throw std::invalid_argument("environment requires irradiance, specular, and BRDF maps");
-    }
-    for (const VkDescriptorImageInfo& image : environment)
+    for (const VkDescriptorImageInfo& image : lighting)
     {
         if (image.sampler == VK_NULL_HANDLE || image.imageView == VK_NULL_HANDLE)
         {
@@ -172,7 +168,7 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
     };
-    std::array<VkWriteDescriptorSet, 11> writes{};
+    std::array<VkWriteDescriptorSet, 12> writes{};
     for (std::size_t index = 0; index < bufferInfos.size(); ++index)
     {
         writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -190,8 +186,9 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
     textureWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     textureWrite.pImageInfo = textures.data();
     constexpr std::array environmentRoles{DescriptorBinding::irradiance,
-        DescriptorBinding::prefilteredSpecular, DescriptorBinding::environmentBrdf};
-    for (std::size_t index = 0; index < environment.size(); ++index)
+        DescriptorBinding::prefilteredSpecular, DescriptorBinding::environmentBrdf,
+        DescriptorBinding::directionalShadow};
+    for (std::size_t index = 0; index < lighting.size(); ++index)
     {
         VkWriteDescriptorSet& environmentWrite =
             writes[bufferInfos.size() + 1U + index];
@@ -200,7 +197,7 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
         environmentWrite.dstBinding = bindingIndex(environmentRoles[index]);
         environmentWrite.descriptorCount = 1;
         environmentWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        environmentWrite.pImageInfo = &environment[index];
+        environmentWrite.pImageInfo = &lighting[index];
     }
     vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()),
         writes.data(), 0, nullptr);
@@ -208,7 +205,7 @@ void DescriptorContext::writeSet(VkDescriptorSet set,
 
 void DescriptorContext::allocateSets(std::span<const DescriptorSetBindings> bindings,
     std::span<const VkDescriptorImageInfo> textures,
-    std::span<const VkDescriptorImageInfo> environment)
+    std::span<const std::array<VkDescriptorImageInfo, 4>> lighting)
 {
     if (layout_ == VK_NULL_HANDLE)
     {
@@ -217,6 +214,10 @@ void DescriptorContext::allocateSets(std::span<const DescriptorSetBindings> bind
     if (bindings.size() > std::numeric_limits<std::uint32_t>::max())
     {
         throw std::length_error("descriptor set count exceeds Vulkan's 32-bit limit");
+    }
+    if (lighting.size() != bindings.size())
+    {
+        throw std::invalid_argument("lighting descriptor count does not match set count");
     }
     const std::optional<DescriptorPlan> plan = planDescriptors(
         textureCapacity_, static_cast<std::uint32_t>(bindings.size()));
@@ -247,7 +248,7 @@ void DescriptorContext::allocateSets(std::span<const DescriptorSetBindings> bind
             device_, &allocateInfo, replacementSets.data()), "vkAllocateDescriptorSets");
         for (std::size_t index = 0; index < replacementSets.size(); ++index)
         {
-            writeSet(replacementSets[index], bindings[index], textures, environment);
+            writeSet(replacementSets[index], bindings[index], textures, lighting[index]);
             if (enableDebugNames_)
             {
                 setDebugName(device_, VK_OBJECT_TYPE_DESCRIPTOR_SET, replacementSets[index],

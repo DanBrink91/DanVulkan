@@ -54,7 +54,7 @@ std::optional<DescriptorPlan> planDescriptors(
     const std::uint64_t storageCount =
         static_cast<std::uint64_t>(setCount) * storageBindingsPerSet;
     const std::uint64_t textureCount = static_cast<std::uint64_t>(setCount) *
-        (static_cast<std::uint64_t>(textureCapacity) + 3U);
+        (static_cast<std::uint64_t>(textureCapacity) + 4U);
     if (storageCount > std::numeric_limits<std::uint32_t>::max() ||
         textureCount > std::numeric_limits<std::uint32_t>::max())
     {
@@ -86,6 +86,8 @@ std::optional<DescriptorPlan> planDescriptors(
         makeBinding(DescriptorBinding::prefilteredSpecular,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT),
         makeBinding(DescriptorBinding::environmentBrdf,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT),
+        makeBinding(DescriptorBinding::directionalShadow,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT)
     };
     plan.poolSizes = {

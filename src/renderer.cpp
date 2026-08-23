@@ -101,14 +101,26 @@ using danvulkan::vk::makeVulkanStructure;
 struct UniformBufferObject {
     glm::mat4 view;
     glm::mat4 projection;
+    glm::mat4 inverseViewProjection;
+    glm::mat4 directionalShadowViewProjection;
     glm::vec4 cameraPositionTime;
     glm::vec4 vegetationInteractorPositionRadius;
     glm::uvec4 lightingCounts;
     glm::vec4 environmentTintIntensity;
     glm::vec4 environmentControls;
+    glm::vec4 atmosphereSkyZenithIntensity;
+    glm::vec4 atmosphereSkyHorizonExponent;
+    glm::vec4 atmosphereFogColorDensity;
+    glm::vec4 atmosphereFogParameters;
+    glm::vec4 atmosphereScatteringParameters;
+    std::array<danvulkan::PlannedDirectionalLight,
+        MaxSceneDirectionalLights> directionalLights;
+    glm::vec4 atmosphereCloudShapeParameters;
+    glm::vec4 atmosphereCloudMovementParameters;
+    glm::vec4 atmosphereCloudLightingParameters;
 };
 
-static_assert(sizeof(UniformBufferObject) == 208,
+static_assert(sizeof(UniformBufferObject) == 592,
     "UniformBufferObject must match the shader std140 layout");
 
 using AABB = danvulkan::assets::Bounds;
@@ -1506,6 +1518,9 @@ private:
     danvulkan::vk::DescriptorContext descriptors;
     danvulkan::vk::PipelineContext pipelines;
     danvulkan::vk::PipelineContext grassPipelines_;
+    danvulkan::vk::PipelineContext skyPipelines_;
+    danvulkan::vk::PipelineContext shadowPipelines_;
+    danvulkan::vk::PipelineContext grassShadowPipelines_;
     danvulkan::vk::UiContext ui_;
     // Declared after the device and allocator so scene and lighting resources retire first.
     danvulkan::vk::SceneContext scene_;
@@ -1655,6 +1670,7 @@ private:
         lighting_.initialize(device, allocator, uploadContext_,
             config_.environmentMap ? &*config_.environmentMap : nullptr,
             config_.maxPointLights, swapchain.imageCount(),
+            config_.directionalShadowResolution,
             enableValidationLayers);
         lightingPlan_.pointLights.reserve(config_.maxPointLights);
         createDescriptorSetLayout();
@@ -1965,6 +1981,9 @@ private:
         lastMemoryStats_ = memoryStats();
         cleanupSwapChain();
         ui_.reset();
+        grassShadowPipelines_.reset();
+        shadowPipelines_.reset();
+        skyPipelines_.reset();
         grassPipelines_.reset();
         pipelines.reset();
         descriptors.reset();
@@ -1994,6 +2013,13 @@ private:
         grassCreateInfo.vertexShader =
             std::filesystem::path(COMPILED_SHADER_PATH) / "grass_vert.spv";
         grassPipelines_.rebuild(grassCreateInfo);
+        danvulkan::vk::PipelineContextCreateInfo skyCreateInfo = pipelineCreateInfo();
+        skyCreateInfo.vertexShader =
+            std::filesystem::path(COMPILED_SHADER_PATH) / "sky_vert.spv";
+        skyCreateInfo.fragmentShader =
+            std::filesystem::path(COMPILED_SHADER_PATH) / "sky_frag.spv";
+        skyCreateInfo.background = true;
+        skyPipelines_.rebuild(skyCreateInfo);
         ui_.rebuild(swapchain.format(),
             std::filesystem::path(COMPILED_SHADER_PATH) / "ui_vert.spv",
             std::filesystem::path(COMPILED_SHADER_PATH) / "ui_frag.spv",
@@ -2234,6 +2260,54 @@ private:
                      grassCreateInfo.samples))
         {
             grassPipelines_.rebuild(grassCreateInfo);
+        }
+
+        danvulkan::vk::PipelineContextCreateInfo skyCreateInfo = createInfo;
+        skyCreateInfo.vertexShader =
+            std::filesystem::path(COMPILED_SHADER_PATH) / "sky_vert.spv";
+        skyCreateInfo.fragmentShader =
+            std::filesystem::path(COMPILED_SHADER_PATH) / "sky_frag.spv";
+        skyCreateInfo.background = true;
+        if (!skyPipelines_)
+        {
+            skyPipelines_.initialize(device, skyCreateInfo);
+        }
+        else if (!skyPipelines_.compatible(skyCreateInfo.descriptorLayout,
+                     skyCreateInfo.colorFormat, skyCreateInfo.depthFormat,
+                     skyCreateInfo.samples))
+        {
+            skyPipelines_.rebuild(skyCreateInfo);
+        }
+
+        danvulkan::vk::PipelineContextCreateInfo shadowCreateInfo = createInfo;
+        shadowCreateInfo.colorFormat = VK_FORMAT_UNDEFINED;
+        shadowCreateInfo.depthFormat = lighting_.shadowFormat();
+        shadowCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        shadowCreateInfo.vertexShader =
+            std::filesystem::path(COMPILED_SHADER_PATH) / "vert_shadow.spv";
+        shadowCreateInfo.fragmentShader.clear();
+        shadowCreateInfo.depthOnly = true;
+        if (!shadowPipelines_)
+        {
+            shadowPipelines_.initialize(device, shadowCreateInfo);
+        }
+        else if (!shadowPipelines_.compatible(shadowCreateInfo.descriptorLayout,
+                     shadowCreateInfo.colorFormat, shadowCreateInfo.depthFormat,
+                     shadowCreateInfo.samples))
+        {
+            shadowPipelines_.rebuild(shadowCreateInfo);
+        }
+        shadowCreateInfo.vertexShader =
+            std::filesystem::path(COMPILED_SHADER_PATH) / "grass_vert_shadow.spv";
+        if (!grassShadowPipelines_)
+        {
+            grassShadowPipelines_.initialize(device, shadowCreateInfo);
+        }
+        else if (!grassShadowPipelines_.compatible(shadowCreateInfo.descriptorLayout,
+                     shadowCreateInfo.colorFormat, shadowCreateInfo.depthFormat,
+                     shadowCreateInfo.samples))
+        {
+            grassShadowPipelines_.rebuild(shadowCreateInfo);
         }
     }
 
@@ -2515,6 +2589,85 @@ private:
         danvulkan::vk::FrameContext& frame = frames[currentFrameIndex];
         VkCommandBuffer commandBuffer = frame.beginCommands();
 
+        const bool shadowWasInitialized = lighting_.shadowInitialized(imageIndex);
+        transitionImage(commandBuffer, lighting_.shadowImage(imageIndex),
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            shadowWasInitialized ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                 : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            shadowWasInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                                 : VK_PIPELINE_STAGE_2_NONE,
+            shadowWasInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+
+        auto shadowAttachment = makeVulkanStructure<VkRenderingAttachmentInfo>(
+            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
+        shadowAttachment.imageView = lighting_.shadowView(imageIndex);
+        shadowAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        shadowAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        shadowAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        shadowAttachment.clearValue.depthStencil = {1.0f, 0};
+        auto shadowRendering = makeVulkanStructure<VkRenderingInfo>(
+            VK_STRUCTURE_TYPE_RENDERING_INFO);
+        shadowRendering.renderArea = {{0, 0}, lighting_.shadowExtent()};
+        shadowRendering.layerCount = 1;
+        shadowRendering.pDepthAttachment = &shadowAttachment;
+        vkCmdBeginRendering(commandBuffer, &shadowRendering);
+
+        VkViewport shadowViewport{};
+        shadowViewport.width = static_cast<float>(lighting_.shadowExtent().width);
+        shadowViewport.height = static_cast<float>(lighting_.shadowExtent().height);
+        shadowViewport.minDepth = 0.0f;
+        shadowViewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
+        const VkRect2D shadowScissor{{0, 0}, lighting_.shadowExtent()};
+        vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
+        vkCmdBindIndexBuffer(commandBuffer, scene_.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        const VkDescriptorSet descriptorSet = descriptors.set(imageIndex);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            shadowPipelines_.layout(), 0, 1, &descriptorSet, 0, nullptr);
+        for (std::size_t variant = 0; variant < PipelineVariantCount; ++variant)
+        {
+            const DrawBatch& batch = scene_.drawBatches[variant];
+            if (batch.commandCount == 0)
+            {
+                continue;
+            }
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                shadowPipelines_.pipeline(variant));
+            const VkDeviceSize offset = static_cast<VkDeviceSize>(batch.firstCommand) *
+                sizeof(VkDrawIndexedIndirectCommand);
+            vkCmdDrawIndexedIndirect(commandBuffer,
+                scene_.indirectCommandsBuffer[imageIndex], offset,
+                batch.commandCount, sizeof(VkDrawIndexedIndirectCommand));
+        }
+        if (scene_.grassDrawBatch.commandCount != 0U)
+        {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                grassShadowPipelines_.pipeline(static_cast<std::size_t>(
+                    PipelineVariant::opaqueDoubleSided)));
+            const VkDeviceSize offset =
+                static_cast<VkDeviceSize>(scene_.grassDrawBatch.firstCommand) *
+                sizeof(VkDrawIndexedIndirectCommand);
+            vkCmdDrawIndexedIndirect(commandBuffer,
+                scene_.indirectCommandsBuffer[imageIndex], offset,
+                scene_.grassDrawBatch.commandCount,
+                sizeof(VkDrawIndexedIndirectCommand));
+        }
+        vkCmdEndRendering(commandBuffer);
+        transitionImage(commandBuffer, lighting_.shadowImage(imageIndex),
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        lighting_.markShadowInitialized(imageIndex);
+
         transitionImage(commandBuffer, swapchain.images()[imageIndex], VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
@@ -2590,9 +2743,16 @@ private:
 
         VkRect2D scissor{ { 0, 0 }, swapchain.extent() };
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            skyPipelines_.pipeline(static_cast<std::size_t>(
+                PipelineVariant::opaqueDoubleSided)));
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            skyPipelines_.layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
         vkCmdBindIndexBuffer(commandBuffer, scene_.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        const VkDescriptorSet descriptorSet = descriptors.set(imageIndex);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
             pipelines.layout(), 0, 1, &descriptorSet, 0, nullptr);
 
@@ -2963,20 +3123,46 @@ private:
         ubo.view = submission.view;
         ubo.projection = submission.projection;
         ubo.projection[1][1] *= -1.0f;
+        ubo.inverseViewProjection = glm::inverse(ubo.projection * ubo.view);
         const float elapsedSeconds = std::chrono::duration<float>(
             std::chrono::steady_clock::now() - applicationStart_).count();
         ubo.cameraPositionTime = glm::vec4(submission.cameraPosition, elapsedSeconds);
         ubo.vegetationInteractorPositionRadius =
             submission.vegetationInteractorPositionRadius;
-        if (!danvulkan::planLighting(submission.pointLights, submission.environment,
+        if (!danvulkan::planLighting(submission.pointLights, submission.directionalLights,
+            submission.environment, submission.atmosphere,
             lighting_.pointLightCapacity(), lightingPlan_))
         {
             throw std::invalid_argument("scene submission contains invalid lighting");
         }
         ubo.lightingCounts.x = static_cast<std::uint32_t>(lightingPlan_.pointLights.size());
+        ubo.lightingCounts.y = lightingPlan_.directionalLightCount;
+        ubo.lightingCounts.z = lightingPlan_.shadowLightIndex < MaxSceneDirectionalLights
+            ? lightingPlan_.shadowLightIndex + 1U : 0U;
         lastPointLightCount_ = ubo.lightingCounts.x;
+        ubo.directionalLights = lightingPlan_.directionalLights;
+        ubo.directionalShadowViewProjection = glm::mat4(1.0f);
+        if (lightingPlan_.shadowLightIndex < submission.directionalLights.size())
+        {
+            const glm::vec3 shadowFocus =
+                submission.vegetationInteractorPositionRadius.w > 0.0f
+                ? glm::vec3(submission.vegetationInteractorPositionRadius)
+                : submission.cameraPosition;
+            ubo.directionalShadowViewProjection =
+                danvulkan::directionalShadowViewProjection(
+                    submission.directionalLights[lightingPlan_.shadowLightIndex],
+                    shadowFocus, config_.directionalShadowResolution);
+        }
         ubo.environmentTintIntensity = lightingPlan_.environmentTintIntensity;
         ubo.environmentControls = lightingPlan_.environmentControls;
+        ubo.atmosphereSkyZenithIntensity = lightingPlan_.atmosphereSkyZenithIntensity;
+        ubo.atmosphereSkyHorizonExponent = lightingPlan_.atmosphereSkyHorizonExponent;
+        ubo.atmosphereFogColorDensity = lightingPlan_.atmosphereFogColorDensity;
+        ubo.atmosphereFogParameters = lightingPlan_.atmosphereFogParameters;
+        ubo.atmosphereScatteringParameters = lightingPlan_.atmosphereScatteringParameters;
+        ubo.atmosphereCloudShapeParameters = lightingPlan_.atmosphereCloudShapeParameters;
+        ubo.atmosphereCloudMovementParameters = lightingPlan_.atmosphereCloudMovementParameters;
+        ubo.atmosphereCloudLightingParameters = lightingPlan_.atmosphereCloudLightingParameters;
         
         const auto cullingBegin = std::chrono::steady_clock::now();
         const danvulkan::vk::SceneDrawCounts drawCounts = scene_.prepareDraws(
@@ -3318,8 +3504,13 @@ private:
             };
         }
         const std::vector<VkDescriptorImageInfo> textureInfos = scene_.textureDescriptorInfos();
-        const auto environmentInfos = lighting_.environmentDescriptors();
-        descriptors.allocateSets(bindings, textureInfos, environmentInfos);
+        std::vector<std::array<VkDescriptorImageInfo, 4>> lightingInfos;
+        lightingInfos.reserve(setCount);
+        for (std::size_t index = 0; index < setCount; ++index)
+        {
+            lightingInfos.push_back(lighting_.lightingDescriptors(index));
+        }
+        descriptors.allocateSets(bindings, textureInfos, lightingInfos);
         scene_.initializeImageGenerations(descriptors.setCount());
     }
 

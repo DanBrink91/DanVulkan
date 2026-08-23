@@ -48,6 +48,7 @@ public:
     // so the next frame sees a chunk window centered on the latest player position.
     void streamTerrain(VulkanRenderer& renderer);
     void setEnvironment(const SceneEnvironment& environment) noexcept;
+    void setAtmosphere(const SceneAtmosphere& atmosphere) noexcept;
     void setKeyLightIntensity(float intensity) noexcept;
     [[nodiscard]] TerrainStreamingDiagnostics streamingDiagnostics() const noexcept;
 

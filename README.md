@@ -94,10 +94,19 @@ roughness detail, and root darkening. Exposed earth, moss, tiny plants, bark, tw
 remain recognizable wherever the grass canopy opens.
 Packed dirt paths use a companion photographed-style albedo with their own mirrored world-space
 scale, shallow irregularity, feathered moss edges, and sparse embedded pebbles. A per-frame
-vegetation interactor also pushes
-and lowers nearby blades around the character entirely on the GPU.
+vegetation interactor also pushes and lowers nearby blades around the character entirely on the
+GPU. A texel-stabilized directional shadow volume follows the character; terrain, trees, the
+animated actor, and the exact GPU-deformed grass ribbons render into a per-image depth map and
+receive soft filtered shadows.
 Trees remain spaced low-poly trunks with layered faceted canopies. A warm key and cool fill follow
-the player over a brighter neutral environment. In follow-camera mode, the character controller
+the player beneath an analytic sky whose sun disc follows the shadow-casting directional light.
+Two animated procedural cloud layers form broad, softly detailed banks without texture assets.
+Their shared world-space density masks the sun and god rays and projects matching moving shadows
+across terrain, trees, and grass.
+World-space height fog softens the streamed horizon, broad low-frequency density banks form moving
+mist around the player, and bounded volumetric integration turns existing tree and terrain shadows
+into god rays both across surfaces and in open air between branches, without allocating a
+post-process framebuffer. In follow-camera mode, the character controller
 accelerates and brakes, turns the animated actor toward travel, follows streamed terrain height,
 rejects steep slopes, and crosses chunk boundaries without changing its WASD basis.
 
@@ -130,9 +139,13 @@ renderer.shutdown();
 
 The renderer loads the scene named by `RendererConfig::modelPath` during initialization. The path
 may be empty when `additionalScenes` supplies the initial renderable content, as it does in the
-application demo. `SceneSubmission` supplies per-frame view, point-light, and environment controls.
+application demo. `SceneSubmission` supplies per-frame view, point-light, directional-light,
+environment, and `SceneAtmosphere` controls. The atmosphere independently exposes sky colors,
+fog density and height response, mist variation, sun appearance, and god-ray strength/distance.
 Additional `ScenePointLight` values can be appended independently, up to
-`RendererConfig::maxPointLights`. `sceneBounds()` supplies optional combined world-space bounds for
+`RendererConfig::maxPointLights`; up to four `SceneDirectionalLight` values are supported, with at
+most one shadow caster. `RendererConfig::directionalShadowResolution` controls its depth-map size.
+`sceneBounds()` supplies optional combined world-space bounds for
 app-owned camera framing. `sceneMeshes()`, `sceneInstances()`, and `sceneMaterials()` expose
 generation-tagged handles plus their current values. Between frames, games can create and remove
 PBR materials, upload and remove meshes, create and remove instances, and update world transforms
@@ -149,7 +162,7 @@ Graphics-pipeline policy and ownership live in a transactional pipeline context.
 
 Uploaded-scene ownership is isolated in a scene context. It holds scene metadata and handles, geometry and textures, per-swapchain scene buffers, free ranges, generation-gated retirement queues, and reusable animation/culling/indirect scratch. It also synchronizes animated poses, transforms bounds, culls and orders visible draws, and builds per-pipeline indirect batches. The top-level renderer now coordinates these focused owners and records frames without owning scene storage directly.
 
-Lighting ownership is isolated in a lighting context. It holds renderer-owned RGBA32F irradiance, GGX-prefiltered specular, and split-sum BRDF images plus persistently mapped point-light storage for each swapchain image. `RendererConfig::environmentMap` accepts an optional decoded RGBA8 or linear RGBA32F equirectangular environment without exposing Vulkan; `assets::loadEnvironment("sky.hdr")` preserves HDR values, while omitting the map selects a small neutral fallback. A Vulkan-free startup stage builds the three IBL inputs, and the shader combines them with bounded multi-light Cook-Torrance direct lighting. Directional/spot lights and shadows remain future refinements.
+Lighting ownership is isolated in a lighting context. It holds renderer-owned RGBA32F irradiance, GGX-prefiltered specular, and split-sum BRDF images plus persistently mapped point-light storage for each swapchain image. `RendererConfig::environmentMap` accepts an optional decoded RGBA8 or linear RGBA32F equirectangular environment without exposing Vulkan; `assets::loadEnvironment("sky.hdr")` preserves HDR values, while omitting the map selects a small neutral fallback. A Vulkan-free startup stage builds the three IBL inputs, and the shader combines them with bounded point and directional Cook-Torrance direct lighting. Up to four directional lights share the uniform ABI; one may own the renderer's player/camera-centered shadow map. Spot lights and cascaded/global shadows remain future refinements.
 
 `RendererConfig::additionalScenes` composes glTF/GLB assets with a caller-supplied root transform,
 with or without a primary scene. The demo uses it to place `ninja_run_free_fire_emote.glb` at

@@ -18,6 +18,10 @@ struct PipelineContextCreateInfo
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
     std::filesystem::path vertexShader;
     std::filesystem::path fragmentShader;
+    bool depthOnly = false;
+    // Fullscreen backgrounds do not consume geometry or participate in depth. They still use
+    // the active color/depth attachment formats so dynamic rendering remains compatible.
+    bool background = false;
     bool enableDebugNames = false;
 };
 

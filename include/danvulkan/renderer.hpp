@@ -67,6 +67,7 @@ struct RendererConfig
     // Lighting uses a per-swapchain-image storage buffer. The shader ABI supports at most 256
     // lights; lower values reduce persistent host-visible memory.
     std::uint32_t maxPointLights = 64;
+    std::uint32_t directionalShadowResolution = 2048;
     // Optional decoded equirectangular image used for image-based lighting. RGBA8 and linear
     // RGBA32F payloads are accepted; assets::loadEnvironment preserves HDR radiance. Null selects
     // a small renderer-owned neutral sky, so the environment descriptors are always valid.
@@ -88,6 +89,7 @@ struct RendererConfig
 };
 
 inline constexpr std::uint32_t MaxScenePointLights = 256;
+inline constexpr std::uint32_t MaxSceneDirectionalLights = 4;
 
 struct ScenePointLight
 {
@@ -98,6 +100,18 @@ struct ScenePointLight
     float intensity = 25.0f;
 };
 
+struct SceneDirectionalLight
+{
+    // Direction that light rays travel in world space. It must be non-zero.
+    glm::vec3 direction{-0.45f, -1.0f, 0.25f};
+    float intensity = 2.0f;
+    glm::vec3 color{1.0f};
+    // At most one submitted directional light may own the shadow map.
+    bool castsShadows = false;
+    float shadowHalfExtent = 3.0f;
+    float shadowDepth = 8.0f;
+};
+
 struct SceneEnvironment
 {
     glm::vec3 tint{1.0f};
@@ -106,6 +120,48 @@ struct SceneEnvironment
     float rotation = 0.0f;
     float diffuseStrength = 1.0f;
     float specularStrength = 1.0f;
+};
+
+struct SceneAtmosphere
+{
+    // The sky is generated analytically from the view direction and the primary directional
+    // light, so it remains infinitely distant and does not require a cubemap asset.
+    glm::vec3 skyZenithColor{0.12f, 0.32f, 0.62f};
+    float skyIntensity = 1.0f;
+    glm::vec3 skyHorizonColor{0.62f, 0.74f, 0.82f};
+    float skyGradientExponent = 0.75f;
+
+    // Density is extinction per world unit. Height falloff of zero produces uniform fog;
+    // positive values concentrate mist below baseHeight.
+    glm::vec3 fogColor{0.48f, 0.58f, 0.60f};
+    float fogDensity = 0.04f;
+    float fogBaseHeight = 0.0f;
+    float fogHeightFalloff = 0.6f;
+    float fogMaxOpacity = 0.82f;
+    // Blends from uniform fog to broad deterministic world-space mist banks.
+    float mistVariation = 0.2f;
+
+    // God rays reuse the selected directional shadow map. This keeps them aligned with the sun
+    // and lets trees, terrain, the actor, and grass interrupt the volumetric light.
+    float godRayStrength = 0.65f;
+    float godRayMaxDistance = 6.0f;
+    float sunAngularRadius = 0.0093f;
+    float sunGlowStrength = 1.0f;
+
+    // Two procedural cloud layers share one world-space density field. This keeps the visible
+    // clouds, sun occlusion, volumetric lighting, and moving ground shadows synchronized without
+    // requiring cloud texture assets.
+    float cloudCoverage = 0.52f;
+    float cloudDensity = 1.1f;
+    float cloudScale = 0.065f;
+    float cloudSoftness = 0.14f;
+    glm::vec2 cloudWindDirection{1.0f, 0.28f};
+    float cloudWindSpeed = 0.16f;
+    float cloudAltitude = 14.0f;
+    float cloudShadowStrength = 0.48f;
+    float cloudSilverLiningStrength = 1.15f;
+    float cloudBrightness = 1.05f;
+    float cloudLayerSeparation = 3.5f;
 };
 
 struct SceneAnimationActorHandle
@@ -146,7 +202,9 @@ struct SceneSubmission
     // gameplay drive grass without exposing controller or actor details to the renderer.
     glm::vec4 vegetationInteractorPositionRadius{0.0f};
     std::vector<ScenePointLight> pointLights{ScenePointLight{}};
+    std::vector<SceneDirectionalLight> directionalLights;
     SceneEnvironment environment;
+    SceneAtmosphere atmosphere;
     std::vector<SceneAnimationActorTransform> animationActorTransforms;
 };
 

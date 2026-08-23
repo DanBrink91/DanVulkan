@@ -5,11 +5,22 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
 {
     mat4 view;
     mat4 projection;
+    mat4 inverseViewProjection;
+    mat4 directionalShadowViewProjection;
     vec4 cameraPositionTime;
     vec4 vegetationInteractorPositionRadius;
     uvec4 lightingCounts;
     vec4 environmentTintIntensity;
     vec4 environmentControls;
+    vec4 atmosphereSkyZenithIntensity;
+    vec4 atmosphereSkyHorizonExponent;
+    vec4 atmosphereFogColorDensity;
+    vec4 atmosphereFogParameters;
+    vec4 atmosphereScatteringParameters;
+    vec4 directionalLightData[8];
+    vec4 atmosphereCloudShapeParameters;
+    vec4 atmosphereCloudMovementParameters;
+    vec4 atmosphereCloudLightingParameters;
 } ubo;
 
 struct Vertex
@@ -103,7 +114,11 @@ void main()
         worldTangentSign = vertex.tangentSign * sign(determinant(mat3(model)));
     }
 
+#ifdef DANVULKAN_SHADOW_PASS
+    gl_Position = ubo.directionalShadowViewProjection * worldPosition;
+#else
     gl_Position = ubo.projection * ubo.view * worldPosition;
+#endif
     outTexCoord = vertex.texCoord;
     outMaterialIndex = draw.materialIndex;
     outWorldNormal = normalize(worldNormal);

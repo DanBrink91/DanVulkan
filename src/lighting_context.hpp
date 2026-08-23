@@ -31,6 +31,7 @@ public:
     void initialize(const DeviceContext& device, VmaAllocator allocator,
         UploadContext& uploads, const assets::TextureAsset* environment,
         std::uint32_t pointLightCapacity, std::size_t imageCount,
+        std::uint32_t shadowResolution,
         bool enableDebugNames);
     void recreateBuffers(std::size_t imageCount);
     void writePointLights(std::size_t imageIndex,
@@ -38,7 +39,17 @@ public:
     void reset() noexcept;
 
     [[nodiscard]] BufferDescriptor lightBuffer(std::size_t imageIndex) const;
-    [[nodiscard]] std::array<VkDescriptorImageInfo, 3> environmentDescriptors() const noexcept;
+    [[nodiscard]] std::array<VkDescriptorImageInfo, 4> lightingDescriptors(
+        std::size_t imageIndex) const;
+    [[nodiscard]] const Image& shadowImage(std::size_t imageIndex) const;
+    [[nodiscard]] VkImageView shadowView(std::size_t imageIndex) const;
+    [[nodiscard]] VkFormat shadowFormat() const noexcept { return shadowFormat_; }
+    [[nodiscard]] VkExtent2D shadowExtent() const noexcept
+    {
+        return {shadowResolution_, shadowResolution_};
+    }
+    [[nodiscard]] bool shadowInitialized(std::size_t imageIndex) const;
+    void markShadowInitialized(std::size_t imageIndex);
     [[nodiscard]] std::uint32_t pointLightCapacity() const noexcept
     {
         return pointLightCapacity_;
@@ -55,6 +66,8 @@ private:
         std::span<const float> pixels, bool repeatHorizontally, UploadContext& uploads,
         const char* name);
     [[nodiscard]] Buffer createLightBuffer(std::size_t index) const;
+    void createShadowImages(std::size_t imageCount);
+    [[nodiscard]] Image createShadowImage(std::size_t index) const;
     void setDebugName(VkObjectType type, std::uint64_t handle, const char* name) const;
 
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
@@ -63,11 +76,16 @@ private:
     VkSampler irradianceSampler_ = VK_NULL_HANDLE;
     VkSampler specularSampler_ = VK_NULL_HANDLE;
     VkSampler brdfSampler_ = VK_NULL_HANDLE;
+    VkSampler shadowSampler_ = VK_NULL_HANDLE;
     Image irradianceImage_;
     Image specularImage_;
     Image brdfImage_;
     std::vector<Buffer> lightBuffers_;
+    std::vector<Image> shadowImages_;
+    std::vector<bool> shadowInitialized_;
     std::uint32_t pointLightCapacity_ = 0;
+    std::uint32_t shadowResolution_ = 0;
+    VkFormat shadowFormat_ = VK_FORMAT_UNDEFINED;
     std::uint32_t environmentMipLevels_ = 1;
     bool enableDebugNames_ = false;
 };

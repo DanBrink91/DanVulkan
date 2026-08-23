@@ -161,7 +161,7 @@ const UiDrawData& GameUi::build(const UiInputState& input,
         if (ui_.collapsingHeader("LIGHTING AND ENVIRONMENT"))
         {
             static_cast<void>(ui_.sliderFloat("KEY LIGHT", controls.keyLightIntensity,
-                0.0f, 100.0f));
+                0.0f, 10.0f));
             static_cast<void>(ui_.sliderFloat("ENV INTENSITY", controls.environment.intensity,
                 0.0f, 2.0f));
             static_cast<void>(ui_.sliderFloat("ENV ROTATION", controls.environment.rotation,
@@ -170,6 +170,22 @@ const UiDrawData& GameUi::build(const UiInputState& input,
                 0.0f, 2.0f));
             static_cast<void>(ui_.sliderFloat("ENV SPECULAR", controls.environment.specularStrength,
                 0.0f, 2.0f));
+            static_cast<void>(ui_.sliderFloat("FOG DENSITY", controls.atmosphere.fogDensity,
+                0.0f, 0.5f));
+            static_cast<void>(ui_.sliderFloat("FOG HEIGHT FALLOFF",
+                controls.atmosphere.fogHeightFalloff, 0.0f, 3.0f));
+            static_cast<void>(ui_.sliderFloat("MIST VARIATION",
+                controls.atmosphere.mistVariation, 0.0f, 1.0f));
+            static_cast<void>(ui_.sliderFloat("GOD RAYS",
+                controls.atmosphere.godRayStrength, 0.0f, 10.0f));
+            static_cast<void>(ui_.sliderFloat("CLOUD COVERAGE",
+                controls.atmosphere.cloudCoverage, 0.0f, 1.0f));
+            static_cast<void>(ui_.sliderFloat("CLOUD DENSITY",
+                controls.atmosphere.cloudDensity, 0.0f, 3.0f));
+            static_cast<void>(ui_.sliderFloat("CLOUD WIND",
+                controls.atmosphere.cloudWindSpeed, 0.0f, 0.8f));
+            static_cast<void>(ui_.sliderFloat("CLOUD SHADOW",
+                controls.atmosphere.cloudShadowStrength, 0.0f, 1.0f));
         }
         if (ui_.collapsingHeader("FRAME TIMING"))
         {

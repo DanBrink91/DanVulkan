@@ -20,9 +20,9 @@ int main()
 {
     using namespace danvulkan::vk;
 
-    require(selectTextureDescriptorCapacity({ 256, 32, 128, 192 }) == 125,
-        "texture capacity did not reserve the environment samplers");
-    require(!selectTextureDescriptorCapacity({ 256, 126, 128, 192 }),
+    require(selectTextureDescriptorCapacity({ 256, 32, 128, 192 }) == 124,
+        "texture capacity did not reserve the lighting samplers");
+    require(!selectTextureDescriptorCapacity({ 256, 125, 128, 192 }),
         "a scene larger than descriptor capacity was accepted");
     require(!selectTextureDescriptorCapacity({ 0, 1, 128, 192 }),
         "zero requested texture capacity was accepted");
@@ -45,7 +45,7 @@ int main()
         "uniform pool size is incorrect");
     require(plan->poolSizes[1].descriptorCount == 18,
         "lighting storage-buffer pool size is incorrect");
-    require(plan->poolSizes[2].descriptorCount == 393,
+    require(plan->poolSizes[2].descriptorCount == 396,
         "texture pool size is incorrect");
     const auto& lights =
         plan->bindings[static_cast<std::size_t>(DescriptorBinding::pointLights)];
@@ -55,11 +55,15 @@ int main()
         plan->bindings[static_cast<std::size_t>(DescriptorBinding::prefilteredSpecular)];
     const auto& brdf =
         plan->bindings[static_cast<std::size_t>(DescriptorBinding::environmentBrdf)];
+    const auto& shadow =
+        plan->bindings[static_cast<std::size_t>(DescriptorBinding::directionalShadow)];
     require(lights.binding == 7 && lights.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
         irradiance.binding == 8 && specular.binding == 9 && brdf.binding == 10 &&
+        shadow.binding == 11 &&
         irradiance.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
         specular.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
-        brdf.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        brdf.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+        shadow.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         "lighting/environment descriptor layout is incorrect");
 
     require(!planDescriptors(0, 3), "zero texture capacity produced a descriptor plan");

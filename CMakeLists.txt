@@ -87,7 +87,7 @@ find_program(
 
 set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 set(SHADER_OUTPUTS)
-foreach(SHADER_NAME IN ITEMS vert frag grass_vert ui_vert ui_frag)
+foreach(SHADER_NAME IN ITEMS vert frag grass_vert sky_vert sky_frag ui_vert ui_frag)
     set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${SHADER_NAME}.${SHADER_NAME}")
     set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
     if(SHADER_NAME MATCHES "vert$")
@@ -105,6 +105,21 @@ foreach(SHADER_NAME IN ITEMS vert frag grass_vert ui_vert ui_frag)
         VERBATIM
     )
     list(APPEND SHADER_OUTPUTS "${SHADER_OUTPUT}")
+endforeach()
+foreach(SHADOW_SHADER IN ITEMS vert grass_vert)
+    set(SHADOW_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${SHADOW_SHADER}.${SHADOW_SHADER}")
+    set(SHADOW_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADOW_SHADER}_shadow.spv")
+    add_custom_command(
+        OUTPUT "${SHADOW_OUTPUT}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SHADER_OUTPUT_DIR}"
+        COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.4
+            -fshader-stage=vert -DDANVULKAN_SHADOW_PASS=1
+            "${SHADOW_SOURCE}" -o "${SHADOW_OUTPUT}"
+        DEPENDS "${SHADOW_SOURCE}"
+        COMMENT "Compiling ${SHADOW_SHADER} directional-shadow shader for Vulkan 1.4"
+        VERBATIM
+    )
+    list(APPEND SHADER_OUTPUTS "${SHADOW_OUTPUT}")
 endforeach()
 add_custom_target(danvulkan_shaders ALL DEPENDS ${SHADER_OUTPUTS})
 

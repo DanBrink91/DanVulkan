@@ -1,0 +1,11 @@
+#version 460
+
+layout(location = 0) out vec2 outNdc;
+
+void main()
+{
+    // One oversized triangle covers the viewport without vertex or index buffers.
+    vec2 position = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+    outNdc = position * 2.0 - 1.0;
+    gl_Position = vec4(outNdc, 0.999999, 1.0);
+}

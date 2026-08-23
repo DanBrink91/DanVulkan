@@ -6,21 +6,39 @@ const int AlphaOpaque = 0;
 const int AlphaMask = 1;
 const int AlphaBlend = 2;
 
+struct DirectionalLightData
+{
+    vec4 directionIntensity;
+    vec4 colorShadow;
+};
+
 layout(set = 0, binding = 0) uniform UniformBufferObject
 {
     mat4 view;
     mat4 projection;
+    mat4 inverseViewProjection;
+    mat4 directionalShadowViewProjection;
     vec4 cameraPositionTime;
     vec4 vegetationInteractorPositionRadius;
     uvec4 lightingCounts;
     vec4 environmentTintIntensity;
     vec4 environmentControls;
+    vec4 atmosphereSkyZenithIntensity;
+    vec4 atmosphereSkyHorizonExponent;
+    vec4 atmosphereFogColorDensity;
+    vec4 atmosphereFogParameters;
+    vec4 atmosphereScatteringParameters;
+    DirectionalLightData directionalLights[4];
+    vec4 atmosphereCloudShapeParameters;
+    vec4 atmosphereCloudMovementParameters;
+    vec4 atmosphereCloudLightingParameters;
 } ubo;
 
 layout(set = 0, binding = 5) uniform sampler2D textures[];
 layout(set = 0, binding = 8) uniform sampler2D irradianceMap;
 layout(set = 0, binding = 9) uniform sampler2D prefilteredSpecularMap;
 layout(set = 0, binding = 10) uniform sampler2D environmentBrdfMap;
+layout(set = 0, binding = 11) uniform sampler2DShadow directionalShadowMap;
 
 struct PointLightData
 {
@@ -148,6 +166,44 @@ float fractalNoise(vec2 point)
     return result;
 }
 
+float cloudLayerDensity(vec2 worldPosition, float scaleMultiplier,
+    float coverageBias, vec2 layerOffset)
+{
+    float coverage = clamp(ubo.atmosphereCloudShapeParameters.x + coverageBias, 0.0, 1.0);
+    float density = ubo.atmosphereCloudShapeParameters.y;
+    if (coverage <= 0.001 || density <= 0.001)
+    {
+        return 0.0;
+    }
+    vec2 windOffset = ubo.atmosphereCloudMovementParameters.xy *
+        ubo.cameraPositionTime.w * ubo.atmosphereCloudMovementParameters.z;
+    vec2 point = (worldPosition - windOffset) *
+        ubo.atmosphereCloudShapeParameters.z * scaleMultiplier + layerOffset;
+    float field = valueNoise(point) * 0.57;
+    field += valueNoise(point * 2.03 + vec2(13.7, -8.2)) * 0.29;
+    field += valueNoise(point * 4.11 + vec2(-4.3, 19.6)) * 0.14;
+    float threshold = 1.0 - coverage;
+    float softness = ubo.atmosphereCloudShapeParameters.w;
+    float shape = smoothstep(threshold - softness, threshold + softness, field);
+    return clamp(shape * density, 0.0, 1.0);
+}
+
+float cloudSunTransmission(vec3 worldPosition, vec3 towardSun)
+{
+    float altitude = ubo.atmosphereCloudMovementParameters.w;
+    float separation = ubo.atmosphereCloudLightingParameters.w;
+    float verticalDirection = max(towardSun.y, 0.06);
+    float lowerDistance = max((altitude - worldPosition.y) / verticalDirection, 0.0);
+    float upperDistance = max((altitude + separation - worldPosition.y) /
+        verticalDirection, 0.0);
+    vec2 lowerPosition = worldPosition.xz + towardSun.xz * lowerDistance;
+    vec2 upperPosition = worldPosition.xz + towardSun.xz * upperDistance;
+    float lower = cloudLayerDensity(lowerPosition, 1.0, 0.0, vec2(0.0));
+    float upper = cloudLayerDensity(upperPosition, 1.63, -0.14, vec2(31.7, -17.2));
+    float cloudDensity = 1.0 - (1.0 - lower) * (1.0 - upper * 0.72);
+    return exp(-cloudDensity * 4.8);
+}
+
 vec3 perturbNormalFromHeight(vec3 worldPosition, vec3 surfaceNormal,
     float detailHeight)
 {
@@ -163,6 +219,135 @@ vec3 perturbNormalFromHeight(vec3 worldPosition, vec3 surfaceNormal,
     vec3 gradient = sign(determinant) *
         (heightDx * gradientX + heightDy * gradientY);
     return normalize(abs(determinant) * surfaceNormal - gradient);
+}
+
+float directionalShadowVisibility(vec3 worldPosition, vec3 normal, vec3 lightDirection)
+{
+    vec4 clip = ubo.directionalShadowViewProjection * vec4(worldPosition, 1.0);
+    vec3 projected = clip.xyz / max(clip.w, 0.00001);
+    vec2 uv = projected.xy * 0.5 + 0.5;
+    if (projected.z <= 0.0 || projected.z >= 1.0 ||
+        any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
+    {
+        return 1.0;
+    }
+    float bias = max(0.00008, 0.00042 *
+        (1.0 - max(dot(normal, lightDirection), 0.0)));
+    vec2 texel = 1.0 / vec2(textureSize(directionalShadowMap, 0));
+    float visibility = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            visibility += texture(directionalShadowMap,
+                vec3(uv + vec2(x, y) * texel, projected.z - bias));
+        }
+    }
+    return visibility / 9.0;
+}
+
+float volumetricShadowVisibility(vec3 worldPosition, out bool insideShadowVolume)
+{
+    vec4 clip = ubo.directionalShadowViewProjection * vec4(worldPosition, 1.0);
+    vec3 projected = clip.xyz / max(clip.w, 0.00001);
+    vec2 uv = projected.xy * 0.5 + 0.5;
+    insideShadowVolume = projected.z > 0.0 && projected.z < 1.0 &&
+        all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
+    if (!insideShadowVolume)
+    {
+        return 1.0;
+    }
+    return texture(directionalShadowMap, vec3(uv, projected.z - 0.00018));
+}
+
+float atmosphereOpticalDepth(vec3 worldPosition)
+{
+    vec3 camera = ubo.cameraPositionTime.xyz;
+    vec3 segment = worldPosition - camera;
+    float distanceToSurface = length(segment);
+    if (distanceToSurface <= 0.0001 || ubo.atmosphereFogColorDensity.w <= 0.0)
+    {
+        return 0.0;
+    }
+
+    float baseHeight = ubo.atmosphereFogParameters.x;
+    float heightFalloff = ubo.atmosphereFogParameters.y;
+    float midpointHeight = (camera.y + worldPosition.y) * 0.5;
+    float heightDensity = exp(clamp(
+        -(midpointHeight - baseHeight) * heightFalloff, -7.0, 7.0));
+
+    vec2 midpoint = (camera.xz + worldPosition.xz) * 0.5;
+    float slowTime = ubo.cameraPositionTime.w * 0.018;
+    float bankSignal = 0.5 + 0.25 * (
+        sin(midpoint.x * 2.2 - 3.159 + slowTime) +
+        sin(midpoint.y * 1.7 + 6.416 - slowTime * 0.72));
+    float mistBank = smoothstep(0.52, 0.82, bankSignal);
+    // Wide low-density gaps alternate with opaque banks. The demo begins inside a bank so the
+    // local effect is immediately legible, while world-space phase keeps streamed chunks joined.
+    float bankDensity = mix(0.42, 5.0, mistBank);
+    float densityVariation = mix(1.0, bankDensity,
+        ubo.atmosphereFogParameters.w);
+    return max(ubo.atmosphereFogColorDensity.w * heightDensity * densityVariation *
+        distanceToSurface, 0.0);
+}
+
+vec3 godRayScattering(vec3 worldPosition, float fogOpacity)
+{
+    if (ubo.lightingCounts.z == 0U ||
+        ubo.atmosphereScatteringParameters.x <= 0.0 || fogOpacity <= 0.001)
+    {
+        return vec3(0.0);
+    }
+
+    vec3 segment = worldPosition - ubo.cameraPositionTime.xyz;
+    float fullDistance = length(segment);
+    float marchDistance = min(fullDistance, ubo.atmosphereScatteringParameters.y);
+    if (marchDistance <= 0.05)
+    {
+        return vec3(0.0);
+    }
+
+    vec3 rayDirection = segment / max(fullDistance, 0.0001);
+    float jitter = hash21(gl_FragCoord.xy + vec2(ubo.cameraPositionTime.w * 0.013));
+    float visibility = 0.0;
+    float coveredSamples = 0.0;
+    const int RayMarchSteps = 4;
+    for (int step = 0; step < RayMarchSteps; ++step)
+    {
+        float alongRay = (float(step) + 0.35 + jitter * 0.3) /
+            float(RayMarchSteps) * marchDistance;
+        bool insideShadowVolume = false;
+        float sampleVisibility = volumetricShadowVisibility(
+            ubo.cameraPositionTime.xyz + rayDirection * alongRay,
+            insideShadowVolume);
+        if (insideShadowVolume)
+        {
+            visibility += sampleVisibility;
+            coveredSamples += 1.0;
+        }
+    }
+    if (coveredSamples < 0.5)
+    {
+        return vec3(0.0);
+    }
+    visibility /= coveredSamples;
+
+    uint lightIndex = ubo.lightingCounts.z - 1U;
+    DirectionalLightData sun = ubo.directionalLights[lightIndex];
+    vec3 lightTravelDirection = normalize(sun.directionIntensity.xyz);
+    float scatteringCosine = clamp(dot(lightTravelDirection, -rayDirection), -1.0, 1.0);
+    const float anisotropy = 0.58;
+    float phaseDenominator = 1.0 + anisotropy * anisotropy -
+        2.0 * anisotropy * scatteringCosine;
+    float phase = (1.0 - anisotropy * anisotropy) /
+        (4.0 * Pi * pow(max(phaseDenominator, 0.001), 1.5));
+    float shaftVisibility = pow(smoothstep(0.05, 0.88, visibility), 1.35);
+    vec3 sunRadiance = sun.colorShadow.rgb * sun.directionIntensity.w;
+    float cloudTransmission = cloudSunTransmission(
+        ubo.cameraPositionTime.xyz + rayDirection * (marchDistance * 0.5),
+        -lightTravelDirection);
+    return sunRadiance * phase * shaftVisibility * fogOpacity *
+        ubo.atmosphereScatteringParameters.x * cloudTransmission;
 }
 
 void main()
@@ -423,6 +608,54 @@ void main()
             vegetationLight) * radiance;
     }
 
+    for (uint lightIndex = 0; lightIndex < ubo.lightingCounts.y; ++lightIndex)
+    {
+        DirectionalLightData light = ubo.directionalLights[lightIndex];
+        vec3 lightDirection = normalize(-light.directionIntensity.xyz);
+        vec3 halfway = normalize(viewDirection + lightDirection);
+        vec3 fresnel = fresnelSchlick(max(dot(halfway, viewDirection), 0.0), reflectance);
+        float distribution = distributionGgx(normal, halfway, roughness);
+        float geometry = geometrySmith(normal, viewDirection, lightDirection, roughness);
+        vec3 specular = distribution * geometry * fresnel /
+            max(4.0 * nDotV * max(dot(normal, lightDirection), 0.0), 0.0001);
+        vec3 diffuseWeight = (1.0 - fresnel) * (1.0 - metallic);
+        float rawNDotL = dot(normal, lightDirection);
+        float nDotL = max(rawNDotL, 0.0);
+        vec3 vegetationLight = vec3(0.0);
+        if (vegetationSurface)
+        {
+            nDotL = clamp((rawNDotL + 0.32) / 1.32, 0.0, 1.0);
+            float backLighting = max(-rawNDotL, 0.0);
+            float forwardScatter = pow(max(dot(-lightDirection, viewDirection), 0.0), 3.0);
+            vec3 transmissionTint = baseColor.rgb * vec3(0.58, 1.0, 0.30);
+            vegetationLight += transmissionTint * backLighting *
+                mix(0.16, 0.62, forwardScatter);
+            vec3 bladeTangent = normalize(inWorldTangent.xyz);
+            float tangentHalfway = clamp(abs(dot(bladeTangent, halfway)), 0.0, 1.0);
+            float longitudinalHighlight = pow(
+                sqrt(max(1.0 - tangentHalfway * tangentHalfway, 0.0)), 18.0);
+            vegetationLight += mix(vec3(0.018), baseColor.rgb, 0.22) *
+                longitudinalHighlight * mix(0.32, 1.0, nDotL);
+        }
+        float visibility = 1.0;
+        if (ubo.lightingCounts.z == lightIndex + 1U)
+        {
+            visibility = directionalShadowVisibility(
+                inWorldPosition, normal, lightDirection);
+            // Preserve a little transmitted light through dense vegetation shadows.
+            visibility = vegetationSurface ? mix(0.18, 1.0, visibility) : visibility;
+        }
+        if (lightIndex == 0U)
+        {
+            float cloudVisibility = cloudSunTransmission(inWorldPosition, lightDirection);
+            visibility *= mix(1.0, cloudVisibility,
+                ubo.atmosphereCloudLightingParameters.x);
+        }
+        vec3 radiance = light.colorShadow.rgb * light.directionIntensity.w;
+        direct += (((diffuseWeight * baseColor.rgb / Pi + specular) * nDotL +
+            vegetationLight) * radiance) * visibility;
+    }
+
     float maximumEnvironmentLod =
         float(max(textureQueryLevels(prefilteredSpecularMap) - 1, 0));
     vec3 environmentFresnel = fresnelSchlickRoughness(nDotV, reflectance, roughness);
@@ -446,6 +679,11 @@ void main()
             ubo.environmentTintIntensity.rgb * ubo.environmentTintIntensity.w;
     }
     vec3 color = ambient + direct + emissive;
+    float opticalDepth = atmosphereOpticalDepth(inWorldPosition);
+    float fogOpacity = min(1.0 - exp(-opticalDepth),
+        ubo.atmosphereFogParameters.z);
+    color = mix(color, ubo.atmosphereFogColorDensity.rgb, fogOpacity);
+    color += godRayScattering(inWorldPosition, fogOpacity);
     color = color / (color + vec3(1.0));
 
     outColor = vec4(color, alphaMode == AlphaBlend ? baseColor.a : 1.0);

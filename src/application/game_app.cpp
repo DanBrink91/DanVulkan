@@ -276,10 +276,11 @@ void GameApp::initializeUiControls()
     uiControls_.musicMuted = audio_.backgroundMusicMuted();
     uiControls_.musicVolume = audio_.backgroundMusicVolume();
     uiControls_.environment = world_.sceneSubmission().environment;
-    if (!world_.sceneSubmission().pointLights.empty())
+    uiControls_.atmosphere = world_.sceneSubmission().atmosphere;
+    if (!world_.sceneSubmission().directionalLights.empty())
     {
         uiControls_.keyLightIntensity =
-            world_.sceneSubmission().pointLights.front().intensity;
+            world_.sceneSubmission().directionalLights.front().intensity;
     }
 
     const AnimationPlaybackState playback = renderer_->animationPlaybackState();
@@ -312,6 +313,24 @@ void GameApp::applyUiControls()
     if (uiControls_.keyLightIntensity != appliedUiControls_.keyLightIntensity)
     {
         world_.setKeyLightIntensity(uiControls_.keyLightIntensity);
+    }
+    if (uiControls_.atmosphere.fogDensity != appliedUiControls_.atmosphere.fogDensity ||
+        uiControls_.atmosphere.fogHeightFalloff !=
+            appliedUiControls_.atmosphere.fogHeightFalloff ||
+        uiControls_.atmosphere.mistVariation !=
+            appliedUiControls_.atmosphere.mistVariation ||
+        uiControls_.atmosphere.godRayStrength !=
+            appliedUiControls_.atmosphere.godRayStrength ||
+        uiControls_.atmosphere.cloudCoverage !=
+            appliedUiControls_.atmosphere.cloudCoverage ||
+        uiControls_.atmosphere.cloudDensity !=
+            appliedUiControls_.atmosphere.cloudDensity ||
+        uiControls_.atmosphere.cloudWindSpeed !=
+            appliedUiControls_.atmosphere.cloudWindSpeed ||
+        uiControls_.atmosphere.cloudShadowStrength !=
+            appliedUiControls_.atmosphere.cloudShadowStrength)
+    {
+        world_.setAtmosphere(uiControls_.atmosphere);
     }
 
     if (!uiControls_.animationAvailable)

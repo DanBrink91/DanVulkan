@@ -112,7 +112,8 @@ PipelineContext::BuiltPipelines PipelineContext::build(
         throw std::invalid_argument("pipeline context requires a descriptor layout");
     }
     const std::optional<GraphicsPipelinePlan> plan = planGraphicsPipelines(
-        createInfo.colorFormat, createInfo.depthFormat, createInfo.samples);
+        createInfo.depthOnly ? VK_FORMAT_R8G8B8A8_UNORM : createInfo.colorFormat,
+        createInfo.depthFormat, createInfo.samples);
     if (!plan)
     {
         throw std::invalid_argument("pipeline context received invalid attachment configuration");
@@ -124,13 +125,19 @@ PipelineContext::BuiltPipelines PipelineContext::build(
     try
     {
         vertexShader = createShaderModule(device_, createInfo.vertexShader);
-        fragmentShader = createShaderModule(device_, createInfo.fragmentShader);
+        if (!createInfo.depthOnly)
+        {
+            fragmentShader = createShaderModule(device_, createInfo.fragmentShader);
+        }
         if (createInfo.enableDebugNames)
         {
             setDebugName(device_, VK_OBJECT_TYPE_SHADER_MODULE, vertexShader,
                 createInfo.vertexShader.string());
-            setDebugName(device_, VK_OBJECT_TYPE_SHADER_MODULE, fragmentShader,
-                createInfo.fragmentShader.string());
+            if (fragmentShader != VK_NULL_HANDLE)
+            {
+                setDebugName(device_, VK_OBJECT_TYPE_SHADER_MODULE, fragmentShader,
+                    createInfo.fragmentShader.string());
+            }
         }
 
         const std::array shaderStages{
@@ -176,10 +183,13 @@ PipelineContext::BuiltPipelines PipelineContext::build(
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
         rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterizer.depthBiasEnable = createInfo.depthOnly ? VK_TRUE : VK_FALSE;
+        rasterizer.depthBiasConstantFactor = createInfo.depthOnly ? 1.25f : 0.0f;
+        rasterizer.depthBiasSlopeFactor = createInfo.depthOnly ? 1.75f : 0.0f;
 
         VkPipelineMultisampleStateCreateInfo multisampling{};
         multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling.sampleShadingEnable = VK_TRUE;
+        multisampling.sampleShadingEnable = createInfo.background ? VK_FALSE : VK_TRUE;
         multisampling.rasterizationSamples = plan->samples;
         multisampling.minSampleShading = 0.2f;
 
@@ -190,18 +200,19 @@ PipelineContext::BuiltPipelines PipelineContext::build(
         colorBlend.alphaBlendOp = VK_BLEND_OP_ADD;
         VkPipelineColorBlendStateCreateInfo colorBlending{};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        colorBlending.attachmentCount = 1;
-        colorBlending.pAttachments = &colorBlend;
+        colorBlending.attachmentCount = createInfo.depthOnly ? 0U : 1U;
+        colorBlending.pAttachments = createInfo.depthOnly ? nullptr : &colorBlend;
 
         VkPipelineDepthStencilStateCreateInfo depthStencil{};
         depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthTestEnable = createInfo.background ? VK_FALSE : VK_TRUE;
         depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
 
         VkPipelineRenderingCreateInfo renderingInfo{};
         renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-        renderingInfo.colorAttachmentCount = 1;
-        renderingInfo.pColorAttachmentFormats = &plan->colorFormat;
+        renderingInfo.colorAttachmentCount = createInfo.depthOnly ? 0U : 1U;
+        renderingInfo.pColorAttachmentFormats = createInfo.depthOnly
+            ? nullptr : &plan->colorFormat;
         renderingInfo.depthAttachmentFormat = plan->depthFormat;
         renderingInfo.stencilAttachmentFormat = plan->hasStencil
             ? plan->depthFormat : VK_FORMAT_UNDEFINED;
@@ -209,7 +220,8 @@ PipelineContext::BuiltPipelines PipelineContext::build(
         VkGraphicsPipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
         pipelineInfo.pNext = &renderingInfo;
-        pipelineInfo.stageCount = static_cast<std::uint32_t>(shaderStages.size());
+        pipelineInfo.stageCount = createInfo.depthOnly
+            ? 1U : static_cast<std::uint32_t>(shaderStages.size());
         pipelineInfo.pStages = shaderStages.data();
         pipelineInfo.pVertexInputState = &vertexInput;
         pipelineInfo.pInputAssemblyState = &inputAssembly;
@@ -224,13 +236,14 @@ PipelineContext::BuiltPipelines PipelineContext::build(
         for (std::size_t index = 0; index < built.pipelines.size(); ++index)
         {
             const PipelineVariantPlan& variant = plan->variants[index];
-            rasterizer.cullMode = variant.cullMode;
-            colorBlend.blendEnable = variant.blendEnable;
+            rasterizer.cullMode = createInfo.background ? VK_CULL_MODE_NONE : variant.cullMode;
+            colorBlend.blendEnable = createInfo.depthOnly ? VK_FALSE : variant.blendEnable;
             colorBlend.srcColorBlendFactor = variant.sourceColorBlendFactor;
             colorBlend.dstColorBlendFactor = variant.destinationColorBlendFactor;
             colorBlend.srcAlphaBlendFactor = variant.sourceAlphaBlendFactor;
             colorBlend.dstAlphaBlendFactor = variant.destinationAlphaBlendFactor;
-            depthStencil.depthWriteEnable = variant.depthWriteEnable;
+            depthStencil.depthWriteEnable = createInfo.background ? VK_FALSE :
+                (createInfo.depthOnly ? VK_TRUE : variant.depthWriteEnable);
             check(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo,
                 nullptr, &built.pipelines[index]),
                 "vkCreateGraphicsPipelines(material variant)");

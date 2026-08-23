@@ -11,6 +11,7 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
     mat4 view;
     mat4 projection;
     vec4 cameraPositionTime;
+    vec4 vegetationInteractorPositionRadius;
     uvec4 lightingCounts;
     vec4 environmentTintIntensity;
     vec4 environmentControls;
@@ -52,6 +53,8 @@ layout(location = 1) flat in int inMaterialIndex;
 layout(location = 2) in vec3 inWorldNormal;
 layout(location = 3) in vec4 inWorldTangent;
 layout(location = 4) in vec3 inWorldPosition;
+layout(location = 5) in vec3 inVertexColor;
+layout(location = 6) in float inSurfaceCoverage;
 
 layout(location = 0) out vec4 outColor;
 
@@ -113,21 +116,213 @@ vec3 materialNormal(MaterialData material, vec2 uv)
 
     vec3 tangent = normalize(inWorldTangent.xyz -
         normal * dot(normal, inWorldTangent.xyz));
-    vec3 bitangent = normalize(cross(normal, tangent)) * inWorldTangent.w;
+    vec3 bitangent = normalize(cross(normal, tangent)) * sign(inWorldTangent.w);
     vec3 sampled = texture(textures[nonuniformEXT(material.textureIndices.y)], uv).xyz * 2.0 - 1.0;
     sampled.xy *= material.roughnessNormalOcclusionAlpha.y;
     return normalize(mat3(tangent, bitangent, normal) * sampled);
+}
+
+float hash21(vec2 point)
+{
+    vec3 p = fract(vec3(point.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float valueNoise(vec2 point)
+{
+    vec2 cell = floor(point);
+    vec2 local = fract(point);
+    vec2 blend = local * local * (3.0 - 2.0 * local);
+    float top = mix(hash21(cell), hash21(cell + vec2(1.0, 0.0)), blend.x);
+    float bottom = mix(hash21(cell + vec2(0.0, 1.0)),
+        hash21(cell + vec2(1.0, 1.0)), blend.x);
+    return mix(top, bottom, blend.y);
+}
+
+float fractalNoise(vec2 point)
+{
+    float result = valueNoise(point) * 0.5714;
+    result += valueNoise(point * 2.03 + vec2(17.1, 9.2)) * 0.2857;
+    result += valueNoise(point * 4.11 + vec2(-5.7, 23.4)) * 0.1429;
+    return result;
+}
+
+vec3 perturbNormalFromHeight(vec3 worldPosition, vec3 surfaceNormal,
+    float detailHeight)
+{
+    // Screen-space derivatives convert the procedural height into a surface gradient without
+    // requiring four additional noise evaluations per fragment.
+    vec3 positionDx = dFdx(worldPosition);
+    vec3 positionDy = dFdy(worldPosition);
+    float heightDx = dFdx(detailHeight);
+    float heightDy = dFdy(detailHeight);
+    vec3 gradientX = cross(positionDy, surfaceNormal);
+    vec3 gradientY = cross(surfaceNormal, positionDx);
+    float determinant = dot(positionDx, gradientX);
+    vec3 gradient = sign(determinant) *
+        (heightDx * gradientX + heightDy * gradientY);
+    return normalize(abs(determinant) * surfaceNormal - gradient);
 }
 
 void main()
 {
     MaterialData material = materials[inMaterialIndex];
     vec2 uv = inTexCoord * material.textureTiling.xy;
+    float surfaceMarker = abs(inWorldTangent.w);
+    bool vegetationSurface = surfaceMarker > 1.5 && surfaceMarker < 2.5;
+    bool generatedTerrainSurface = surfaceMarker > 2.5;
+    float terrainCoverage = generatedTerrainSurface
+        ? clamp(inSurfaceCoverage, 0.0, 1.0) : 0.0;
+    float terrainDetailHeight = 0.0;
+    float terrainRoughnessTarget = 0.96;
+    float terrainPebbleMask = 0.0;
 
-    vec4 baseColor = material.baseColorFactor;
-    if (material.textureIndices.x >= 0)
+    vec4 baseColor = material.baseColorFactor * vec4(inVertexColor, 1.0);
+    if (material.textureIndices.x >= 0 && !generatedTerrainSurface)
     {
         baseColor *= texture(textures[nonuniformEXT(material.textureIndices.x)], uv);
+    }
+    if (vegetationSurface)
+    {
+        float centerHighlight = 1.0 - abs(fract(uv.x) * 2.0 - 1.0);
+        float rootLight = mix(0.56, 1.0, smoothstep(0.02, 0.78, uv.y));
+        float edgeGlow = smoothstep(0.55, 1.0, abs(uv.x * 2.0 - 1.0));
+        baseColor.rgb *= rootLight *
+            mix(0.92, 1.055, centerHighlight * centerHighlight) *
+            mix(1.0, 1.035, edgeGlow);
+    }
+    else if (generatedTerrainSurface)
+    {
+        // All layers are sampled in world space, so their scale and phase remain continuous as
+        // terrain chunks stream independently. Coverage can come from either the procedural
+        // field or a future authored paint map.
+        vec2 world = inWorldPosition.xz;
+        float coverage = terrainCoverage;
+        float dirtWeight = 1.0 - coverage;
+        float macroNoise = fractalNoise(world * 1.65 + vec2(13.7, -8.4));
+        float middleNoise = fractalNoise(world * 13.0 + vec2(-21.3, 31.8));
+        float fineNoise = valueNoise(world * 72.0 + vec2(7.4, 19.1));
+        float mossMask = smoothstep(0.34, 0.76,
+            macroNoise * 0.72 + middleNoise * 0.28);
+
+        vec3 forestSoil = mix(vec3(0.075, 0.090, 0.035),
+            vec3(0.14, 0.135, 0.050), middleNoise);
+        vec3 forestMoss = mix(vec3(0.070, 0.205, 0.026),
+            vec3(0.145, 0.330, 0.052), fineNoise);
+        vec3 forestFloor = mix(forestSoil, forestMoss, mossMask * 0.82);
+        float forestTextureHeight = 0.5;
+        if (material.textureIndices.x >= 0)
+        {
+            // One source image covers roughly a third of a terrain world unit. Mirroring it in
+            // both axes makes the borders mathematically continuous; broad procedural tinting
+            // keeps the repeated capture from forming an obvious checkerboard at a distance.
+            vec2 forestTexturePosition = world * 6.25;
+            vec2 forestTexturePhase = fract(forestTexturePosition * 0.5) * 2.0;
+            vec2 forestTextureUv = 1.0 - abs(forestTexturePhase - 1.0);
+            vec3 capturedForest = texture(
+                textures[nonuniformEXT(material.textureIndices.x)], forestTextureUv).rgb;
+            forestTextureHeight = dot(capturedForest, vec3(0.2126, 0.7152, 0.0722));
+            capturedForest = capturedForest * vec3(1.16, 1.20, 1.10) +
+                vec3(0.008, 0.006, 0.003);
+            capturedForest *= mix(0.86, 1.10,
+                macroNoise * 0.72 + middleNoise * 0.28);
+            forestFloor = mix(forestFloor, capturedForest, 0.90);
+        }
+
+        float compactedNoise = fractalNoise(world * 7.5 + vec2(4.0, 27.0));
+        float pathGrain = valueNoise(world * 58.0 + vec2(-15.0, 3.0));
+        vec3 packedDirt = mix(vec3(0.245, 0.175, 0.072),
+            vec3(0.455, 0.335, 0.135), compactedNoise);
+        packedDirt *= mix(0.86, 1.08, pathGrain);
+        float pathTextureHeight = 0.5;
+        if (material.textureIndices.w >= 0 && dirtWeight > 0.001)
+        {
+            // The terrain material reserves its occlusion descriptor for a second albedo layer.
+            // Mirrored world mapping keeps this capture continuous across both its own borders
+            // and independently streamed terrain chunks.
+            vec2 pathTexturePosition = world * 7.0 + vec2(0.37, -0.19);
+            vec2 pathTexturePhase = fract(pathTexturePosition * 0.5) * 2.0;
+            vec2 pathTextureUv = 1.0 - abs(pathTexturePhase - 1.0);
+            vec3 capturedPath = texture(
+                textures[nonuniformEXT(material.textureIndices.w)], pathTextureUv).rgb;
+            pathTextureHeight = dot(capturedPath, vec3(0.2126, 0.7152, 0.0722));
+            capturedPath = capturedPath * vec3(1.07, 1.04, 0.96) +
+                vec3(0.006, 0.004, 0.002);
+            capturedPath *= mix(0.90, 1.08,
+                compactedNoise * 0.68 + macroNoise * 0.32);
+            packedDirt = mix(packedDirt, capturedPath, 0.92);
+        }
+
+        // Sparse embedded stones use one deterministic cell lookup and an antialiased edge.
+        vec2 pebblePosition = world * 43.0;
+        vec2 pebbleCell = floor(pebblePosition);
+        vec2 pebbleLocal = fract(pebblePosition);
+        float pebbleRandom = hash21(pebbleCell + vec2(67.0, 11.0));
+        vec2 pebbleCenter = vec2(
+            hash21(pebbleCell + vec2(3.0, 29.0)),
+            hash21(pebbleCell + vec2(47.0, 5.0)));
+        pebbleCenter = mix(vec2(0.28), vec2(0.72), pebbleCenter);
+        vec2 pebbleOffset = pebbleLocal - pebbleCenter;
+        pebbleOffset.x *= mix(0.75, 1.45,
+            hash21(pebbleCell + vec2(19.0, 53.0)));
+        float pebbleRadius = mix(0.105, 0.235, pebbleRandom);
+        float pebbleDistance = length(pebbleOffset);
+        float pebbleEdge = max(fwidth(pebbleDistance), 0.015);
+        terrainPebbleMask = dirtWeight * step(0.83, pebbleRandom) *
+            (1.0 - smoothstep(pebbleRadius, pebbleRadius + pebbleEdge,
+                pebbleDistance));
+        vec3 pebbleColor = mix(vec3(0.20, 0.185, 0.145),
+            vec3(0.43, 0.405, 0.315), pebbleRandom);
+        packedDirt = mix(packedDirt, pebbleColor, terrainPebbleMask * 0.88);
+
+        // The semantic transition is deliberately softer than a color-only blend. Moss and
+        // darker roots encroach into the feathered edge instead of outlining the path.
+        float rootDensity = smoothstep(0.08, 0.92, coverage);
+        float pathEdge = 4.0 * coverage * dirtWeight;
+        forestFloor = mix(forestFloor, forestFloor * vec3(0.82, 1.02, 0.72),
+            pathEdge * 0.20);
+        vec3 layeredGround = mix(packedDirt, forestFloor, rootDensity);
+        baseColor.rgb = layeredGround;
+        baseColor.rgb *= mix(0.96, mix(0.90, 1.02, macroNoise),
+            rootDensity * 0.20);
+
+        // A shader-only short-growth layer fills gaps without allocating more instances.
+        vec2 microPosition = world * 145.0;
+        vec2 cell = floor(microPosition);
+        vec2 local = fract(microPosition);
+        float randomValue = hash21(cell);
+        float lean = (hash21(cell + vec2(17.0, 41.0)) * 2.0 - 1.0) * 0.34;
+        float strandCenter = 0.5 + (local.y - 0.48) * lean;
+        float strandDistance = abs(local.x - strandCenter);
+        float antialiasWidth = max(fwidth(strandDistance), 0.018);
+        float strand = 1.0 - smoothstep(0.045, 0.045 + antialiasWidth,
+            strandDistance);
+        strand *= smoothstep(0.02, 0.20, local.y) *
+            (1.0 - smoothstep(0.72, 0.99, local.y));
+        float patchNoise = mix(0.76, 1.0,
+            hash21(floor(world * 23.0)));
+        vec3 undergrowthColor = mix(vec3(0.055, 0.19, 0.022),
+            vec3(0.17, 0.42, 0.045), randomValue);
+        baseColor.rgb = mix(baseColor.rgb,
+            baseColor.rgb * vec3(0.48, 0.63, 0.38), coverage * 0.30 * patchNoise);
+        baseColor.rgb = mix(baseColor.rgb, undergrowthColor,
+            coverage * strand * 0.62);
+
+        // These amplitudes are in world units. They alter lighting only; terrain collision and
+        // silhouettes continue to use the streamed CPU mesh.
+        terrainDetailHeight = (macroNoise - 0.5) * 0.00115 +
+            (middleNoise - 0.5) * 0.00048 +
+            (fineNoise - 0.5) * 0.00016 +
+            (forestTextureHeight - 0.32) * coverage * 0.00062 +
+            (pathTextureHeight - 0.34) * dirtWeight * 0.00054 +
+            terrainPebbleMask * 0.00072 - dirtWeight *
+                (compactedNoise - 0.5) * 0.00034;
+        terrainRoughnessTarget = mix(
+            mix(0.90, 0.95, compactedNoise),
+            mix(0.965, 0.99, middleNoise), coverage);
+        terrainRoughnessTarget = mix(terrainRoughnessTarget, 0.78,
+            terrainPebbleMask * 0.55);
     }
 
     int alphaMode = material.materialFlags.y;
@@ -152,9 +347,13 @@ void main()
     }
     metallic = clamp(metallic, 0.0, 1.0);
     roughness = clamp(roughness, 0.045, 1.0);
+    if (generatedTerrainSurface)
+    {
+        roughness = mix(roughness, terrainRoughnessTarget, 0.84);
+    }
 
     float occlusion = 1.0;
-    if (material.textureIndices.w >= 0)
+    if (material.textureIndices.w >= 0 && !generatedTerrainSurface)
     {
         float sampledOcclusion = texture(textures[nonuniformEXT(material.textureIndices.w)], uv).r;
         occlusion = mix(1.0, sampledOcclusion,
@@ -168,6 +367,11 @@ void main()
     }
 
     vec3 normal = materialNormal(material, uv);
+    if (generatedTerrainSurface)
+    {
+        normal = perturbNormalFromHeight(
+            inWorldPosition, normal, terrainDetailHeight);
+    }
     vec3 viewDirection = normalize(ubo.cameraPositionTime.xyz - inWorldPosition);
     vec3 reflectance = mix(vec3(0.04), baseColor.rgb, metallic);
     float nDotV = max(dot(normal, viewDirection), 0.0);
@@ -194,8 +398,29 @@ void main()
         }
         vec3 radiance = light.colorIntensity.rgb * light.colorIntensity.w *
             rangeWeight / lightDistanceSquared;
-        float nDotL = max(dot(normal, lightDirection), 0.0);
-        direct += (diffuseWeight * baseColor.rgb / Pi + specular) * radiance * nDotL;
+        float rawNDotL = dot(normal, lightDirection);
+        float nDotL = max(rawNDotL, 0.0);
+        vec3 vegetationLight = vec3(0.0);
+        if (vegetationSurface)
+        {
+            // Thin leaves retain readable form at grazing angles and transmit warm green light
+            // when the source lies behind them.
+            nDotL = clamp((rawNDotL + 0.32) / 1.32, 0.0, 1.0);
+            float backLighting = max(-rawNDotL, 0.0);
+            float forwardScatter = pow(max(dot(-lightDirection, viewDirection), 0.0), 3.0);
+            vec3 transmissionTint = baseColor.rgb * vec3(0.58, 1.0, 0.30);
+            vegetationLight += transmissionTint * backLighting *
+                mix(0.16, 0.62, forwardScatter);
+
+            vec3 bladeTangent = normalize(inWorldTangent.xyz);
+            float tangentHalfway = clamp(abs(dot(bladeTangent, halfway)), 0.0, 1.0);
+            float longitudinalHighlight = pow(
+                sqrt(max(1.0 - tangentHalfway * tangentHalfway, 0.0)), 18.0);
+            vegetationLight += mix(vec3(0.018), baseColor.rgb, 0.22) *
+                longitudinalHighlight * mix(0.32, 1.0, nDotL);
+        }
+        direct += ((diffuseWeight * baseColor.rgb / Pi + specular) * nDotL +
+            vegetationLight) * radiance;
     }
 
     float maximumEnvironmentLod =
@@ -213,6 +438,13 @@ void main()
         ubo.environmentControls.z;
     vec3 ambient = (diffuseEnvironment + specularEnvironment) *
         ubo.environmentTintIntensity.rgb * ubo.environmentTintIntensity.w * occlusion;
+    if (vegetationSurface)
+    {
+        vec3 backEnvironment = textureLod(
+            irradianceMap, environmentUv(-normal), 0.0).rgb;
+        ambient += baseColor.rgb * backEnvironment * vec3(0.045, 0.085, 0.025) *
+            ubo.environmentTintIntensity.rgb * ubo.environmentTintIntensity.w;
+    }
     vec3 color = ambient + direct + emissive;
     color = color / (color + vec3(1.0));
 

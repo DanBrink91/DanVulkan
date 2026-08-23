@@ -87,7 +87,7 @@ find_program(
 
 set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 set(SHADER_OUTPUTS)
-foreach(SHADER_NAME IN ITEMS vert frag ui_vert ui_frag)
+foreach(SHADER_NAME IN ITEMS vert frag grass_vert ui_vert ui_frag)
     set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${SHADER_NAME}.${SHADER_NAME}")
     set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
     if(SHADER_NAME MATCHES "vert$")
@@ -110,9 +110,11 @@ add_custom_target(danvulkan_shaders ALL DEPENDS ${SHADER_OUTPUTS})
 
 add_library(danvulkan_assets STATIC
     src/assets.cpp
+    src/grass.cpp
     src/assets_internal.hpp
     src/gltf_loader.cpp
     include/danvulkan/assets.hpp
+    include/danvulkan/grass.hpp
 )
 add_library(DanVulkan::Assets ALIAS danvulkan_assets)
 
@@ -226,6 +228,14 @@ add_library(danvulkan_application STATIC
     src/application/game_camera.hpp
     src/application/game_character.cpp
     src/application/game_character.hpp
+    src/application/generated_foliage.cpp
+    src/application/generated_foliage.hpp
+    src/application/generated_terrain.cpp
+    src/application/generated_terrain.hpp
+    src/application/terrain_surface.cpp
+    src/application/terrain_surface.hpp
+    src/application/terrain_streaming.cpp
+    src/application/terrain_streaming.hpp
     src/application/game_ui.cpp
     src/application/game_ui.hpp
     src/application/game_world.cpp
@@ -254,11 +264,15 @@ if(BUILD_TESTING)
         tests/game_camera_tests.cpp
         src/application/game_camera.cpp
         src/application/game_character.cpp
+        src/application/generated_foliage.cpp
+        src/application/generated_terrain.cpp
+        src/application/terrain_surface.cpp
+        src/application/terrain_streaming.cpp
     )
     target_include_directories(danvulkan_application_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_features(danvulkan_application_tests PRIVATE cxx_std_20)
-    target_link_libraries(danvulkan_application_tests PRIVATE glm::glm)
+    target_link_libraries(danvulkan_application_tests PRIVATE DanVulkan::Assets glm::glm)
     add_executable(danvulkan_ui_tests tests/ui_tests.cpp src/ui.cpp)
     target_compile_features(danvulkan_ui_tests PRIVATE cxx_std_20)
     target_include_directories(danvulkan_ui_tests PRIVATE
@@ -322,7 +336,8 @@ if(BUILD_TESTING)
     target_include_directories(danvulkan_lighting_planner_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_features(danvulkan_lighting_planner_tests PRIVATE cxx_std_20)
-    target_link_libraries(danvulkan_lighting_planner_tests PRIVATE DanVulkan::Assets glm::glm)
+    target_link_libraries(danvulkan_lighting_planner_tests PRIVATE
+        DanVulkan::Assets Vulkan::Vulkan glm::glm)
     target_include_directories(danvulkan_environment_precompute_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_features(danvulkan_environment_precompute_tests PRIVATE cxx_std_20)
@@ -380,6 +395,7 @@ if(BUILD_TESTING)
     add_test(NAME danvulkan_scene_planning COMMAND danvulkan_scene_planner_tests)
     add_test(NAME danvulkan_scene_context COMMAND danvulkan_scene_context_tests)
     add_test(NAME danvulkan_validation_application COMMAND DanVulkan --application-smoke-test)
+    add_test(NAME danvulkan_terrain_traversal COMMAND DanVulkan --terrain-traversal-check)
     add_test(NAME danvulkan_validation_smoke COMMAND DanVulkan --smoke-test)
     add_test(NAME danvulkan_validation_platform COMMAND DanVulkan --platform-smoke-test)
     add_test(NAME danvulkan_validation_step COMMAND DanVulkan --step-smoke-test)
@@ -397,11 +413,12 @@ if(BUILD_TESTING)
         danvulkan_environment_precompute
         danvulkan_scene_planning
         danvulkan_scene_context
-        danvulkan_validation_application danvulkan_validation_smoke
+        danvulkan_validation_application danvulkan_terrain_traversal danvulkan_validation_smoke
         danvulkan_validation_platform
         danvulkan_validation_step danvulkan_validation_resize danvulkan_validation_minimize
         danvulkan_animated_stress
         PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     )
     set_tests_properties(danvulkan_animated_stress PROPERTIES LABELS stress TIMEOUT 180)
+    set_tests_properties(danvulkan_terrain_traversal PROPERTIES LABELS streaming TIMEOUT 90)
 endif()

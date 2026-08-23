@@ -293,6 +293,10 @@ private:
 [[nodiscard]] SceneAsset loadObj(const std::filesystem::path& path);
 [[nodiscard]] SceneAsset loadGltf(const std::filesystem::path& path);
 [[nodiscard]] SceneAsset loadScene(const std::filesystem::path& path);
+// Decodes an ordinary material texture into an RGBA8 payload. Color textures should use sRGB;
+// data textures such as normal or roughness maps should request linear sampling.
+[[nodiscard]] TextureAsset loadTexture(const std::filesystem::path& path,
+    ColorSpace colorSpace = ColorSpace::srgb);
 // Decodes an equirectangular environment into linear RGBA32F texels. HDR files retain values
 // above one; conventional images are promoted and linearized by stb_image.
 [[nodiscard]] TextureAsset loadEnvironment(const std::filesystem::path& path);

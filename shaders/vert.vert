@@ -6,6 +6,7 @@ layout(set = 0, binding = 0) uniform UniformBufferObject
     mat4 view;
     mat4 projection;
     vec4 cameraPositionTime;
+    vec4 vegetationInteractorPositionRadius;
     uvec4 lightingCounts;
     vec4 environmentTintIntensity;
     vec4 environmentControls;
@@ -66,6 +67,8 @@ layout(location = 1) flat out int outMaterialIndex;
 layout(location = 2) out vec3 outWorldNormal;
 layout(location = 3) out vec4 outWorldTangent;
 layout(location = 4) out vec3 outWorldPosition;
+layout(location = 5) out vec3 outVertexColor;
+layout(location = 6) out float outSurfaceCoverage;
 
 void main()
 {
@@ -106,4 +109,6 @@ void main()
     outWorldNormal = normalize(worldNormal);
     outWorldTangent = vec4(normalize(worldTangent), worldTangentSign);
     outWorldPosition = worldPosition.xyz;
+    outVertexColor = vertex.color;
+    outSurfaceCoverage = vertex.unused0;
 }

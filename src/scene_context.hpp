@@ -1,6 +1,7 @@
 #pragma once
 
 #include <danvulkan/assets.hpp>
+#include <danvulkan/grass.hpp>
 
 #include "animation_player.hpp"
 #include "descriptor_context.hpp"
@@ -31,6 +32,27 @@ struct DrawData
     std::int32_t jointOffset = -1;
 };
 
+struct GrassTileDrawData
+{
+    assets::Bounds localBounds{};
+    std::uint32_t firstBlade = 0;
+    std::uint32_t bladeCount = 0;
+    // 0..2 are active segment LODs; 255 means no previous frame has selected one.
+    std::uint8_t lodState = 255U;
+};
+
+struct GrassDrawData
+{
+    bool enabled = false;
+    std::array<std::uint32_t, 3> indexCounts{};
+    std::array<std::uint32_t, 3> firstIndices{};
+    std::array<float, 3> distances{};
+    std::array<float, 3> populationRatios{1.0f, 0.5f, 0.18f};
+    float hysteresis = 0.0f;
+    float transitionBand = 0.0f;
+    std::vector<GrassTileDrawData> tiles;
+};
+
 struct MeshData
 {
     std::uint32_t indexCount = 0;
@@ -40,6 +62,7 @@ struct MeshData
     std::uint32_t meshResourceSlot = 0;
     DrawData drawData;
     assets::Bounds localBounds;
+    GrassDrawData grass;
 };
 
 struct MeshResourceData
@@ -52,6 +75,7 @@ struct MeshResourceData
     std::uint32_t pipelineVariant = 0;
     assets::Bounds bounds{};
     std::string name;
+    GrassDrawData grass;
 };
 
 struct GeometryRange
@@ -92,6 +116,8 @@ struct TransformData
 
 using Vertex = assets::Vertex;
 static_assert(sizeof(Vertex) == 112, "CPU vertex layout must match shaders/vert.vert");
+static_assert(sizeof(Vertex) % sizeof(std::uint32_t) == 0,
+    "grass raw-word addressing requires a whole-word geometry stride");
 
 struct SkinPaletteState
 {
@@ -287,6 +313,8 @@ public:
     std::vector<VkDrawIndexedIndirectCommand> indirectCommands;
     std::array<DrawBatch, PipelineVariantCount> drawBatches{};
     std::array<std::vector<std::size_t>, PipelineVariantCount> visibleMeshScratch_;
+    DrawBatch grassDrawBatch{};
+    std::vector<std::size_t> visibleGrassScratch_;
     std::vector<Buffer> indirectCommandsBuffer;
 
     Buffer indexBuffer;

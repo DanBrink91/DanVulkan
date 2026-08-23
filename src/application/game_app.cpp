@@ -4,8 +4,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace danvulkan::application {
@@ -29,9 +33,12 @@ InputState translateInput(const DemoInputState& source, bool enabled) noexcept
 }
 }
 
-GameApp::GameApp(RendererConfig config, bool enableBackgroundMusic, bool showUiInitially)
-    : backgroundMusicEnabled_(enableBackgroundMusic)
+GameApp::GameApp(RendererConfig config, bool enableBackgroundMusic, bool showUiInitially,
+    bool terrainTraversalCheck)
+    : backgroundMusicEnabled_(enableBackgroundMusic),
+      terrainTraversalCheck_(terrainTraversalCheck)
 {
+    GameWorld::configureStreamingCapacity(config);
     if (showUiInitially)
     {
         ui_.toggle();
@@ -63,15 +70,33 @@ void GameApp::run()
     }
     initializeUiControls();
     auto previousTime = std::chrono::steady_clock::now();
+    const TerrainStreamingDiagnostics initialStreaming = world_.streamingDiagnostics();
+    bool traversalComplete = false;
+    bool traversalTargetReached = false;
+    std::uint64_t traversalFrames = 0;
+    std::uint64_t renderStallFrames = 0;
+    std::uint64_t publishStallFrames = 0;
+    double maximumFrameMilliseconds = 0.0;
+    double maximumFrameCpuMilliseconds = 0.0;
+    double maximumPublishMilliseconds = 0.0;
+    constexpr double renderStallThresholdMilliseconds = 50.0;
+    constexpr double publishStallThresholdMilliseconds = 8.0;
+    constexpr double severeFrameStallMilliseconds = 1000.0;
+    constexpr double severePublishStallMilliseconds = 500.0;
 
     try
     {
         while (renderer_->beginFrame())
         {
             const auto currentTime = std::chrono::steady_clock::now();
-            const float deltaSeconds = std::clamp(
+            const float measuredDeltaSeconds = std::clamp(
                 std::chrono::duration<float>(currentTime - previousTime).count(), 0.0f, 0.1f);
             previousTime = currentTime;
+            // Advance consistently on fast CI renderers and presentation-paced desktop drivers.
+            // Generation still runs at real worker speed, so traversal stresses streaming without
+            // making this check take the character's full real-time walking duration.
+            const float deltaSeconds = terrainTraversalCheck_ ?
+                0.1f : measuredDeltaSeconds;
 
             const DemoInputState platformInput = platform_->consumeDemoInput();
             if (platformInput.toggleUi)
@@ -129,7 +154,12 @@ void GameApp::run()
                 gameplayInput.cursorDeltaX = 0.0f;
                 gameplayInput.cursorDeltaY = 0.0f;
             }
-            const InputState input = translateInput(gameplayInput, gameplayInputEnabled);
+            InputState input = translateInput(gameplayInput, gameplayInputEnabled);
+            if (terrainTraversalCheck_)
+            {
+                input = {};
+                input.moveForward = !traversalTargetReached;
+            }
             world_.update(input, deltaSeconds, extent.width, extent.height);
             renderer_->submitScene(world_.sceneSubmission());
             if (uiDrawData != nullptr)
@@ -137,7 +167,88 @@ void GameApp::run()
                 renderer_->submitUi(*uiDrawData);
             }
             renderer_->endFrame();
+            const auto publishStart = std::chrono::steady_clock::now();
+            world_.streamTerrain(*renderer_);
+            const double publishMilliseconds = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - publishStart).count();
             applyUiControls();
+
+            if (terrainTraversalCheck_)
+            {
+                ++traversalFrames;
+                const TerrainStreamingDiagnostics streaming = world_.streamingDiagnostics();
+                const std::int32_t crossedChunks = std::abs(
+                    streaming.playerChunk.z - initialStreaming.playerChunk.z);
+                traversalTargetReached = crossedChunks >= 2;
+                traversalComplete = traversalTargetReached &&
+                    streaming.requestedWindowComplete && renderer_->runtimeUploadReady();
+
+                if (traversalFrames % 500U == 0U)
+                {
+                    std::cout << "terrain traversal progress: frames=" << traversalFrames
+                              << " player_chunk=[" << streaming.playerChunk.x << ','
+                              << streaming.playerChunk.z << "] requested_center=["
+                              << streaming.requestedCenter.x << ',' << streaming.requestedCenter.z
+                              << "] complete_chunks=" << streaming.completeChunkCount
+                              << std::endl;
+                }
+
+                const RendererPerformanceStats latest = renderer_->performanceStats();
+                if (traversalFrames > 30U)
+                {
+                    maximumFrameMilliseconds = std::max(
+                        maximumFrameMilliseconds, latest.frameMilliseconds);
+                    maximumFrameCpuMilliseconds = std::max(
+                        maximumFrameCpuMilliseconds, latest.frameCpuMilliseconds);
+                    maximumPublishMilliseconds = std::max(
+                        maximumPublishMilliseconds, publishMilliseconds);
+                    renderStallFrames += latest.frameMilliseconds >
+                        renderStallThresholdMilliseconds ? 1U : 0U;
+                    publishStallFrames += publishMilliseconds >
+                        publishStallThresholdMilliseconds ? 1U : 0U;
+                }
+
+                if (traversalComplete)
+                {
+                    std::cout << "terrain traversal check: frames=" << traversalFrames
+                              << " crossed_chunks=" << crossedChunks
+                              << " resident_chunks=" << streaming.residentChunkCount
+                              << " complete_chunks=" << streaming.completeChunkCount
+                              << " max_frame_ms=" << maximumFrameMilliseconds
+                              << " max_frame_cpu_ms=" << maximumFrameCpuMilliseconds
+                              << " max_publish_ms=" << maximumPublishMilliseconds
+                              << " render_stalls_over_50ms=" << renderStallFrames
+                              << " publish_stalls_over_8ms=" << publishStallFrames
+                              << std::endl;
+                    break;
+                }
+                // This mode can render far faster than an interactive application. Yield a small
+                // amount of wall time so the check measures the persistent workers rather than
+                // monopolizing their CPU cores with a synthetic foreground spin loop.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        if (terrainTraversalCheck_)
+        {
+            if (!traversalComplete)
+            {
+                const TerrainStreamingDiagnostics streaming = world_.streamingDiagnostics();
+                std::cerr << "terrain traversal incomplete: frames=" << traversalFrames
+                          << " player_chunk=[" << streaming.playerChunk.x << ','
+                          << streaming.playerChunk.z << "] requested_center=["
+                          << streaming.requestedCenter.x << ',' << streaming.requestedCenter.z
+                          << "] resident_chunks=" << streaming.residentChunkCount
+                          << " complete_chunks=" << streaming.completeChunkCount << '\n';
+                throw std::runtime_error(
+                    "terrain traversal check ended before crossing two chunks and completing "
+                    "the requested streaming window");
+            }
+            if (maximumFrameMilliseconds > severeFrameStallMilliseconds ||
+                maximumPublishMilliseconds > severePublishStallMilliseconds)
+            {
+                throw std::runtime_error(
+                    "terrain traversal check detected a severe streaming stall");
+            }
         }
         audio_.stopBackgroundMusic();
         renderer_->shutdown();

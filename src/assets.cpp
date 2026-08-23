@@ -370,6 +370,11 @@ TextureAsset loadEnvironment(const std::filesystem::path& path)
     return decodeEnvironmentImpl(path);
 }
 
+TextureAsset loadTexture(const std::filesystem::path& path, ColorSpace colorSpace)
+{
+    return decodeTexture(path, colorSpace);
+}
+
 TextureHandle SceneAsset::addTexture(TextureAsset texture)
 {
     const TextureHandle handle{ static_cast<std::uint32_t>(textures_.size()), initialGeneration };

@@ -18,6 +18,8 @@ enum class CameraMode
 class GameCamera
 {
 public:
+    explicit GameCamera(CameraMode initialMode = CameraMode::free) noexcept;
+
     void frame(const glm::vec3& minimum, const glm::vec3& maximum,
         std::uint32_t viewportWidth, std::uint32_t viewportHeight);
     void setViewport(std::uint32_t width, std::uint32_t height);
@@ -47,7 +49,7 @@ private:
     float nearClip_ = 0.1f;
     float farClip_ = 100.0f;
     float aspect_ = 16.0f / 9.0f;
-    CameraMode mode_ = CameraMode::free;
+    CameraMode mode_;
     glm::vec3 followTarget_{0.0f};
     glm::vec3 followForward_{0.0f, 0.0f, 1.0f};
     float followDistance_ = 3.0f;

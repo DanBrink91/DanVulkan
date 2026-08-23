@@ -61,6 +61,7 @@
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -101,12 +102,13 @@ struct UniformBufferObject {
     glm::mat4 view;
     glm::mat4 projection;
     glm::vec4 cameraPositionTime;
+    glm::vec4 vegetationInteractorPositionRadius;
     glm::uvec4 lightingCounts;
     glm::vec4 environmentTintIntensity;
     glm::vec4 environmentControls;
 };
 
-static_assert(sizeof(UniformBufferObject) == 192,
+static_assert(sizeof(UniformBufferObject) == 208,
     "UniformBufferObject must match the shader std140 layout");
 
 using AABB = danvulkan::assets::Bounds;
@@ -1017,6 +1019,256 @@ public:
         return { meshSlot, scene_.meshGenerations_[meshSlot] };
     }
 
+    [[nodiscard]] SceneMeshHandle uploadGrass(
+        std::span<const RuntimeGrassBlade> sourceBlades,
+        SceneMaterialHandle materialHandle,
+        const RuntimeGrassLodDescription& lod,
+        std::string name)
+    {
+        requireSceneUpdateAllowed("uploadGrass");
+        requireValidMaterial(materialHandle, "uploadGrass");
+        PreparedRuntimeGrass prepared = prepareRuntimeGrass(
+            std::vector<RuntimeGrassBlade>(sourceBlades.begin(), sourceBlades.end()), lod);
+        RuntimeMeshUploadDescription upload{{}, prepared.indices, materialHandle,
+            name.empty() ? "procedural Bezier grass" : std::move(name), &prepared};
+        return uploadMeshBatch(std::span<const RuntimeMeshUploadDescription>(&upload, 1U)).front();
+    }
+
+    [[nodiscard]] std::vector<SceneMeshHandle> uploadMeshBatch(
+        std::span<const RuntimeMeshUploadDescription> uploads)
+    {
+        requireSceneUpdateAllowed("uploadMeshBatch");
+        if (uploads.empty())
+        {
+            throw std::invalid_argument("uploadMeshBatch requires at least one mesh");
+        }
+        if (!uploadContext_.asyncBufferUploadReady())
+        {
+            throw std::logic_error("uploadMeshBatch asynchronous staging slot is busy");
+        }
+        if (scene_.meshResources.size() - scene_.freeMeshSlots_.size() + uploads.size() >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+        {
+            throw std::runtime_error("renderer mesh handle capacity has been reached");
+        }
+
+        std::uint64_t totalVertices64 = 0;
+        std::uint64_t totalIndices64 = 0;
+        for (const RuntimeMeshUploadDescription& upload : uploads)
+        {
+            requireValidMaterial(upload.material, "uploadMeshBatch");
+            const bool grassUpload = upload.grass != nullptr;
+            const std::size_t recordCount = grassUpload
+                ? upload.grass->records.size() : upload.vertices.size();
+            const std::size_t vertexUnits = grassUpload
+                ? packedGrassGeometryUnits(recordCount)
+                : recordCount;
+            if (recordCount == 0U || upload.indices.empty())
+            {
+                throw std::invalid_argument("uploadMeshBatch contains an empty mesh");
+            }
+            if (vertexUnits >
+                    static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+                upload.indices.size() >
+                    static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+            {
+                throw std::runtime_error("batched geometry exceeds renderer index limits");
+            }
+            if (std::ranges::any_of(upload.indices,
+                    [&](std::uint32_t index)
+                    {
+                        return index >= (grassUpload ? grassTemplateVertexCount : recordCount);
+                    }))
+            {
+                throw std::invalid_argument("uploadMeshBatch contains an out-of-range index");
+            }
+            if (grassUpload &&
+                (!upload.vertices.empty() ||
+                    upload.indices.data() != upload.grass->indices.data() ||
+                    upload.indices.size() != upload.grass->indices.size() ||
+                    upload.grass->tiles.empty()))
+            {
+                throw std::invalid_argument(
+                    "uploadMeshBatch grass metadata does not describe its source spans");
+            }
+            totalVertices64 += vertexUnits;
+            totalIndices64 += upload.indices.size();
+        }
+        if (totalVertices64 > std::numeric_limits<std::uint32_t>::max() ||
+            totalIndices64 > std::numeric_limits<std::uint32_t>::max())
+        {
+            throw std::runtime_error("batched geometry capacity overflowed");
+        }
+
+        ensureGeometryCapacity(static_cast<std::uint32_t>(totalVertices64),
+            static_cast<std::uint32_t>(totalIndices64));
+        std::vector<GeometryRange> vertexRanges;
+        std::vector<GeometryRange> indexRanges;
+        vertexRanges.reserve(uploads.size());
+        indexRanges.reserve(uploads.size());
+        try
+        {
+            for (const RuntimeMeshUploadDescription& upload : uploads)
+            {
+                const std::size_t vertexUnits = upload.grass != nullptr
+                    ? packedGrassGeometryUnits(upload.grass->records.size())
+                    : upload.vertices.size();
+                vertexRanges.push_back(scene_.allocateGeometryRange(scene_.freeVertexRanges_,
+                    static_cast<std::uint32_t>(vertexUnits)));
+                indexRanges.push_back(scene_.allocateGeometryRange(scene_.freeIndexRanges_,
+                    static_cast<std::uint32_t>(upload.indices.size())));
+            }
+        }
+        catch (...)
+        {
+            for (const GeometryRange range : vertexRanges)
+            {
+                scene_.releaseGeometryRange(scene_.freeVertexRanges_, range);
+            }
+            for (const GeometryRange range : indexRanges)
+            {
+                scene_.releaseGeometryRange(scene_.freeIndexRanges_, range);
+            }
+            throw;
+        }
+
+        std::vector<danvulkan::vk::BufferUploadRequest> requests;
+        requests.reserve(uploads.size() * 2U);
+        std::vector<MeshResourceData> resources(uploads.size());
+        for (std::size_t index = 0; index < uploads.size(); ++index)
+        {
+            const RuntimeMeshUploadDescription& upload = uploads[index];
+            const GeometryRange vertexRange = vertexRanges[index];
+            const GeometryRange indexRange = indexRanges[index];
+            const void* recordData = upload.grass != nullptr
+                ? static_cast<const void*>(upload.grass->records.data())
+                : static_cast<const void*>(upload.vertices.data());
+            const VkDeviceSize recordBytes = upload.grass != nullptr
+                ? sizeof(PackedRuntimeGrassBlade) *
+                    static_cast<VkDeviceSize>(upload.grass->records.size())
+                : sizeof(Vertex) * static_cast<VkDeviceSize>(upload.vertices.size());
+            requests.push_back({scene_.vertexBuffer,
+                sizeof(Vertex) * static_cast<VkDeviceSize>(vertexRange.offset),
+                recordData, recordBytes,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT});
+            requests.push_back({scene_.indexBuffer,
+                sizeof(std::uint32_t) * static_cast<VkDeviceSize>(indexRange.offset),
+                upload.indices.data(),
+                sizeof(std::uint32_t) * static_cast<VkDeviceSize>(indexRange.count),
+                VK_BUFFER_USAGE_INDEX_BUFFER_BIT});
+
+            const float maximum = std::numeric_limits<float>::max();
+            AABB bounds{glm::vec3(maximum), glm::vec3(-maximum)};
+            if (upload.grass != nullptr)
+            {
+                for (const PackedRuntimeGrassBlade& blade : upload.grass->records)
+                {
+                    bounds.minVertex = glm::min(bounds.minVertex, blade.base);
+                    bounds.maxVertex = glm::max(bounds.maxVertex, blade.base);
+                }
+            }
+            else
+            {
+                for (const Vertex& vertex : upload.vertices)
+                {
+                    bounds.minVertex = glm::min(bounds.minVertex, vertex.pos);
+                    bounds.maxVertex = glm::max(bounds.maxVertex, vertex.pos);
+                }
+            }
+            MeshResourceData& resource = resources[index];
+            resource.indexCount = indexRange.count;
+            resource.vertexCount = vertexRange.count;
+            resource.firstIndex = indexRange.offset;
+            resource.vertexOffset = vertexRange.offset;
+            resource.materialIndex = static_cast<std::int32_t>(upload.material.slot);
+            const MaterialData& material = scene_.matData[upload.material.slot];
+            resource.pipelineVariant = static_cast<std::uint32_t>(
+                material.materialFlags.y * 2 + material.materialFlags.z);
+            resource.bounds = bounds;
+            resource.name = upload.name;
+
+            if (upload.grass != nullptr)
+            {
+                const PreparedRuntimeGrass& grass = *upload.grass;
+                resource.grass.enabled = true;
+                resource.grass.indexCounts = grassTemplateIndexCounts;
+                resource.grass.firstIndices = {
+                    resource.firstIndex + grassTemplateFirstIndexOffsets[0],
+                    resource.firstIndex + grassTemplateFirstIndexOffsets[1],
+                    resource.firstIndex + grassTemplateFirstIndexOffsets[2]};
+                resource.grass.distances = {grass.lod.highDetailDistance,
+                    grass.lod.mediumDetailDistance, grass.lod.maximumDistance};
+                resource.grass.populationRatios = {
+                    1.0f, grass.lod.mediumPopulation, grass.lod.lowPopulation};
+                resource.grass.hysteresis = grass.lod.hysteresis;
+                resource.grass.transitionBand = grass.lod.transitionBand;
+                resource.grass.tiles.reserve(grass.tiles.size());
+                for (const RuntimeGrassTileDescription& source : grass.tiles)
+                {
+                    resource.grass.tiles.push_back({
+                        {source.boundsMinimum, source.boundsMaximum},
+                        source.firstBlade, source.bladeCount});
+                }
+                const glm::vec3 padding(grass.maximumHeight * 0.5f);
+                resource.bounds.minVertex -= padding;
+                resource.bounds.maxVertex += padding;
+                resource.bounds.maxVertex.y += grass.maximumHeight;
+            }
+        }
+
+        try
+        {
+            uploadContext_.uploadBuffersAsync(requests, "runtime mesh batch");
+        }
+        catch (...)
+        {
+            for (const GeometryRange range : vertexRanges)
+            {
+                scene_.releaseGeometryRange(scene_.freeVertexRanges_, range);
+            }
+            for (const GeometryRange range : indexRanges)
+            {
+                scene_.releaseGeometryRange(scene_.freeIndexRanges_, range);
+            }
+            throw;
+        }
+
+        std::vector<SceneMeshHandle> handles;
+        handles.reserve(resources.size());
+        for (MeshResourceData& resource : resources)
+        {
+            std::uint32_t slot = 0;
+            if (!scene_.freeMeshSlots_.empty())
+            {
+                slot = scene_.freeMeshSlots_.back();
+                scene_.freeMeshSlots_.pop_back();
+                scene_.meshResources[slot] = std::move(resource);
+                scene_.meshAlive_[slot] = true;
+            }
+            else
+            {
+                slot = static_cast<std::uint32_t>(scene_.meshResources.size());
+                if (resource.name.empty())
+                {
+                    resource.name = "runtime mesh " + std::to_string(slot);
+                }
+                scene_.meshResources.push_back(std::move(resource));
+                scene_.meshGenerations_.push_back(scene_.sceneGeneration_);
+                scene_.meshAlive_.push_back(true);
+            }
+            handles.push_back({slot, scene_.meshGenerations_[slot]});
+        }
+        scene_.reserveFrameScratch();
+        captureMemoryPeak();
+        return handles;
+    }
+
+    [[nodiscard]] bool runtimeUploadReady()
+    {
+        requireSceneUpdateAllowed("runtimeUploadReady");
+        return uploadContext_.asyncBufferUploadReady();
+    }
+
     void destroyMesh(SceneMeshHandle meshHandle)
     {
         requireSceneUpdateAllowed("destroyMesh");
@@ -1095,6 +1347,7 @@ public:
         mesh.meshResourceSlot = meshHandle.slot;
         mesh.drawData = draw;
         mesh.localBounds = resource.bounds;
+        mesh.grass = resource.grass;
         scene_.meshData.push_back(mesh);
         scene_.aabbs.push_back(scene_.transformedBounds(resource.bounds, worldTransform));
 
@@ -1252,6 +1505,7 @@ private:
     danvulkan::vk::PresentationContext presentation;
     danvulkan::vk::DescriptorContext descriptors;
     danvulkan::vk::PipelineContext pipelines;
+    danvulkan::vk::PipelineContext grassPipelines_;
     danvulkan::vk::UiContext ui_;
     // Declared after the device and allocator so scene and lighting resources retire first.
     danvulkan::vk::SceneContext scene_;
@@ -1294,6 +1548,8 @@ private:
     std::vector<danvulkan::vk::Buffer> uniformBuffers;
 
     Camera camera;
+    const std::chrono::steady_clock::time_point applicationStart_ =
+        std::chrono::steady_clock::now();
     std::chrono::high_resolution_clock::time_point previousTime = std::chrono::high_resolution_clock::now();
     std::chrono::high_resolution_clock::time_point lastTimeStamp = previousTime;
     glm::vec3 lightPos, lightSpeed;
@@ -1709,6 +1965,7 @@ private:
         lastMemoryStats_ = memoryStats();
         cleanupSwapChain();
         ui_.reset();
+        grassPipelines_.reset();
         pipelines.reset();
         descriptors.reset();
         uniformBuffers.clear();
@@ -1733,6 +1990,10 @@ private:
     {
         vkDeviceWaitIdle(device); // don't touch resources that may still be in use
         pipelines.rebuild(pipelineCreateInfo());
+        danvulkan::vk::PipelineContextCreateInfo grassCreateInfo = pipelineCreateInfo();
+        grassCreateInfo.vertexShader =
+            std::filesystem::path(COMPILED_SHADER_PATH) / "grass_vert.spv";
+        grassPipelines_.rebuild(grassCreateInfo);
         ui_.rebuild(swapchain.format(),
             std::filesystem::path(COMPILED_SHADER_PATH) / "ui_vert.spv",
             std::filesystem::path(COMPILED_SHADER_PATH) / "ui_frag.spv",
@@ -1960,6 +2221,19 @@ private:
                      createInfo.depthFormat, createInfo.samples))
         {
             pipelines.rebuild(createInfo);
+        }
+        danvulkan::vk::PipelineContextCreateInfo grassCreateInfo = createInfo;
+        grassCreateInfo.vertexShader =
+            std::filesystem::path(COMPILED_SHADER_PATH) / "grass_vert.spv";
+        if (!grassPipelines_)
+        {
+            grassPipelines_.initialize(device, grassCreateInfo);
+        }
+        else if (!grassPipelines_.compatible(grassCreateInfo.descriptorLayout,
+                     grassCreateInfo.colorFormat, grassCreateInfo.depthFormat,
+                     grassCreateInfo.samples))
+        {
+            grassPipelines_.rebuild(grassCreateInfo);
         }
     }
 
@@ -2277,7 +2551,7 @@ private:
         colorAttachment.storeOp = msaaSamples == VK_SAMPLE_COUNT_1_BIT
             ? VK_ATTACHMENT_STORE_OP_STORE
             : VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        colorAttachment.clearValue.color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+        colorAttachment.clearValue.color = { { 0.012f, 0.022f, 0.038f, 1.0f } };
         if (msaaSamples != VK_SAMPLE_COUNT_1_BIT)
         {
             colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
@@ -2335,6 +2609,19 @@ private:
                 sizeof(VkDrawIndexedIndirectCommand);
             vkCmdDrawIndexedIndirect(commandBuffer, scene_.indirectCommandsBuffer[imageIndex], offset,
                 batch.commandCount, sizeof(VkDrawIndexedIndirectCommand));
+        }
+        if (scene_.grassDrawBatch.commandCount != 0U)
+        {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                grassPipelines_.pipeline(static_cast<std::size_t>(
+                    PipelineVariant::opaqueDoubleSided)));
+            const VkDeviceSize offset =
+                static_cast<VkDeviceSize>(scene_.grassDrawBatch.firstCommand) *
+                sizeof(VkDrawIndexedIndirectCommand);
+            vkCmdDrawIndexedIndirect(commandBuffer,
+                scene_.indirectCommandsBuffer[imageIndex], offset,
+                scene_.grassDrawBatch.commandCount,
+                sizeof(VkDrawIndexedIndirectCommand));
         }
         vkCmdEndRendering(commandBuffer);
 
@@ -2676,7 +2963,11 @@ private:
         ubo.view = submission.view;
         ubo.projection = submission.projection;
         ubo.projection[1][1] *= -1.0f;
-        ubo.cameraPositionTime = glm::vec4(submission.cameraPosition, 1.0f);
+        const float elapsedSeconds = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - applicationStart_).count();
+        ubo.cameraPositionTime = glm::vec4(submission.cameraPosition, elapsedSeconds);
+        ubo.vegetationInteractorPositionRadius =
+            submission.vegetationInteractorPositionRadius;
         if (!danvulkan::planLighting(submission.pointLights, submission.environment,
             lighting_.pointLightCapacity(), lightingPlan_))
         {
@@ -3034,7 +3325,11 @@ private:
 
     void loadModel()
     {
-        danvulkan::assets::SceneAsset scene = danvulkan::assets::loadScene(MODEL_PATH);
+        danvulkan::assets::SceneAsset scene;
+        if (!MODEL_PATH.empty())
+        {
+            scene = danvulkan::assets::loadScene(MODEL_PATH);
+        }
         for (const AdditionalSceneConfig& additional : config_.additionalScenes)
         {
             static_cast<void>(scene.append(
@@ -3599,6 +3894,26 @@ SceneMeshHandle VulkanRenderer::uploadMesh(
     std::string name)
 {
     return impl_->uploadMesh(vertices, indices, material, std::move(name));
+}
+
+SceneMeshHandle VulkanRenderer::uploadGrass(
+    std::span<const RuntimeGrassBlade> blades,
+    SceneMaterialHandle material,
+    const RuntimeGrassLodDescription& lod,
+    std::string name)
+{
+    return impl_->uploadGrass(blades, material, lod, std::move(name));
+}
+
+std::vector<SceneMeshHandle> VulkanRenderer::uploadMeshBatch(
+    std::span<const RuntimeMeshUploadDescription> uploads)
+{
+    return impl_->uploadMeshBatch(uploads);
+}
+
+bool VulkanRenderer::runtimeUploadReady()
+{
+    return impl_->runtimeUploadReady();
 }
 
 void VulkanRenderer::destroyMesh(SceneMeshHandle mesh)

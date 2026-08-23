@@ -1,6 +1,7 @@
 #pragma once
 
 #include <danvulkan/assets.hpp>
+#include <danvulkan/grass.hpp>
 #include <danvulkan/platform.hpp>
 #include <danvulkan/ui.hpp>
 
@@ -58,7 +59,8 @@ struct RendererConfig
     std::string applicationName = "DanVulkan";
     std::uint32_t width = 1280;
     std::uint32_t height = 720;
-    std::filesystem::path modelPath = "models/naruto_hiddenly_village.glb";
+    // May be empty when additionalScenes supplies the initial renderable content.
+    std::filesystem::path modelPath = "models/ninja_run_free_fire_emote.glb";
     std::vector<AdditionalSceneConfig> additionalScenes;
     std::uint32_t maxTextures = 256;
     std::uint32_t maxMaterials = 2048;
@@ -140,6 +142,9 @@ struct SceneSubmission
     // GLM configuration and the renderer performs the framebuffer Y inversion.
     glm::mat4 projection{1.0f};
     glm::vec3 cameraPosition{0.0f};
+    // A zero radius disables vegetation interaction. Keeping this semantic at scene level lets
+    // gameplay drive grass without exposing controller or actor details to the renderer.
+    glm::vec4 vegetationInteractorPositionRadius{0.0f};
     std::vector<ScenePointLight> pointLights{ScenePointLight{}};
     SceneEnvironment environment;
     std::vector<SceneAnimationActorTransform> animationActorTransforms;
@@ -290,6 +295,18 @@ struct RuntimeMaterialDescription
     bool unlit = false;
 };
 
+// A non-owning description consumed immediately by uploadMeshBatch. Ordinary meshes populate
+// vertices and leave grass null. Prepared grass uploads leave vertices empty and supply their
+// compact records and tile/LOD metadata through grass.
+struct RuntimeMeshUploadDescription
+{
+    std::span<const danvulkan::assets::Vertex> vertices;
+    std::span<const std::uint32_t> indices;
+    SceneMaterialHandle material;
+    std::string name;
+    const PreparedRuntimeGrass* grass = nullptr;
+};
+
 struct SceneInstanceInfo
 {
     SceneInstanceHandle handle;
@@ -394,8 +411,8 @@ struct RendererMemoryStats
     std::uint64_t peakHeapUsageBytes = 0;
     std::uint32_t peakBlockCount = 0;
     std::uint32_t peakAllocationCount = 0;
-    // The upload arena is one persistently mapped allocation reused from offset zero after each
-    // synchronous upload. CPU geometry is temporary and should be zero outside scene preparation.
+    // Upload arenas are persistently mapped. Synchronous asset work reuses one after waiting;
+    // runtime mesh batches retain a second arena until its asynchronous fence signals.
     std::uint64_t stagingArenaBytes = 0;
     std::uint64_t stagingArenaGrowthCount = 0;
     std::uint64_t uploadSubmissionCount = 0;
@@ -483,6 +500,22 @@ public:
         std::span<const std::uint32_t> indices,
         SceneMaterialHandle material,
         std::string name = {});
+    // Stores compact blade records in the same generation-safe geometry arena as ordinary
+    // meshes. Records are grouped into world-aligned internal tiles that share one upload while
+    // retaining independent frustum culling, hysteretic curve LOD, and stable population thinning.
+    [[nodiscard]] SceneMeshHandle uploadGrass(
+        std::span<const RuntimeGrassBlade> blades,
+        SceneMaterialHandle material,
+        const RuntimeGrassLodDescription& lod = {},
+        std::string name = {});
+    // Copies all source spans into one retained staging arena and submits one ordered transfer
+    // without waiting for its fence. The returned meshes can be instantiated immediately: later
+    // graphics submissions share the same queue and therefore execute after the transfer.
+    [[nodiscard]] std::vector<SceneMeshHandle> uploadMeshBatch(
+        std::span<const RuntimeMeshUploadDescription> uploads);
+    // False means the one retained asynchronous staging slot is still owned by the previous
+    // batch. Call between frames before publishing another streamed chunk.
+    [[nodiscard]] bool runtimeUploadReady();
     // Mesh metadata can be destroyed only after all of its instances are removed.
     // Geometry storage reclamation is handled separately from handle invalidation.
     void destroyMesh(SceneMeshHandle mesh);

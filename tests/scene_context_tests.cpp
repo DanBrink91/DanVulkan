@@ -72,6 +72,68 @@ int main()
     require(scene.cpuScratchBytes() != 0,
         "draw preparation scratch must be retained for subsequent frames");
 
+    SceneContext grassScene;
+    MeshData grass = mesh(static_cast<std::uint32_t>(
+        PipelineVariant::opaqueDoubleSided), 0, nearBounds);
+    grass.vertexOffset = 100U;
+    grass.drawData.vertexOffset = 100;
+    grass.grass.enabled = true;
+    grass.grass.indexCounts = grassTemplateIndexCounts;
+    grass.grass.firstIndices = {200U, 284U, 320U};
+    grass.grass.distances = {0.5f, 1.5f, 3.0f};
+    grass.grass.populationRatios = {1.0f, 0.5f, 0.18f};
+    grass.grass.hysteresis = 0.1f;
+    grass.grass.transitionBand = 0.1f;
+    grass.grass.tiles = {
+        {nearBounds, 0U, 100U},
+        {culledBounds, 100U, 100U}
+    };
+    grassScene.meshData = {grass};
+    grassScene.aabbs = {{{-0.1f, -0.1f, 0.1f}, {4.2f, 0.1f, 0.2f}}};
+    grassScene.transformData.push_back({glm::mat4(1.0f)});
+    grassScene.reserveFrameScratch();
+    static_cast<void>(grassScene.prepareDraws(
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f)));
+    require(grassScene.grassDrawBatch.commandCount == 1U &&
+            grassScene.indirectCommands[0].instanceCount == 100U &&
+            grassScene.indirectCommands[0].indexCount == 84U &&
+            grassScene.indirectCommands[0].firstIndex == 200U &&
+            grassScene.indirectCommands[0].vertexOffset == 100 &&
+            grassScene.drawData[0].vertexOffset == 2800 &&
+            grassScene.drawData[0].jointOffset == 100,
+        "near grass tile did not select its full-density three-leaf tuft draw");
+    require(grassScene.grassDrawBatch.commandCount == 1U,
+        "an off-frustum grass tile was not culled independently from its parent mesh");
+
+    static_cast<void>(grassScene.prepareDraws(
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.75f)));
+    require(grassScene.indirectCommands[0].indexCount == 84U &&
+            grassScene.indirectCommands[0].instanceCount > 50U &&
+            grassScene.indirectCommands[0].instanceCount < 100U,
+        "grass did not progressively thin its stable blade population through an LOD band");
+    static_cast<void>(grassScene.prepareDraws(
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.85f)));
+    require(grassScene.indirectCommands[0].indexCount == 36U,
+        "grass did not leave high-detail LOD after crossing its hysteresis boundary");
+    static_cast<void>(grassScene.prepareDraws(
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.75f)));
+    require(grassScene.indirectCommands[0].indexCount == 36U,
+        "grass LOD chattered while the camera remained inside its hysteresis dead band");
+    static_cast<void>(grassScene.prepareDraws(
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 1.0f)));
+    require(grassScene.indirectCommands[0].instanceCount == 50U &&
+            grassScene.indirectCommands[0].indexCount == 36U,
+        "mid-distance grass did not select its nested medium LOD");
+    static_cast<void>(grassScene.prepareDraws(
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 2.0f)));
+    require(grassScene.indirectCommands[0].instanceCount == 18U &&
+            grassScene.indirectCommands[0].indexCount == 12U,
+        "far grass did not select its nested low LOD");
+    static_cast<void>(grassScene.prepareDraws(
+        glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 4.0f)));
+    require(grassScene.grassDrawBatch.commandCount == 0U,
+        "grass beyond its maximum distance was not culled");
+
     const AnimationUpdateSettings animationSettings{
         true, 0.25f, 0.5f, 30.0f, 15.0f
     };

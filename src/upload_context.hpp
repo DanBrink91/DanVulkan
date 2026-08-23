@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace danvulkan::vk
 {
@@ -20,6 +21,15 @@ struct ImageUploadLevel
     VkDeviceSize byteOffset = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+};
+
+struct BufferUploadRequest
+{
+    VkBuffer destination = VK_NULL_HANDLE;
+    VkDeviceSize destinationOffset = 0;
+    const void* data = nullptr;
+    VkDeviceSize size = 0;
+    VkBufferUsageFlags destinationUsage = 0;
 };
 
 class UploadContext
@@ -46,15 +56,22 @@ public:
         const void* data, VkDeviceSize size, std::string_view name);
     void copyBuffer(VkBuffer source, VkBuffer destination, VkDeviceSize size,
         VkBufferUsageFlags destinationUsage, std::string_view name);
+    // Records many disjoint range copies into one ordered graphics-queue submission. The source
+    // bytes are copied into a retained staging arena before this returns; readiness only governs
+    // when that arena and command buffer can be reused for the next batch.
+    void uploadBuffersAsync(
+        std::span<const BufferUploadRequest> requests, std::string_view name);
+    [[nodiscard]] bool asyncBufferUploadReady();
 
     [[nodiscard]] UploadArenaStats arenaStats() const noexcept
     {
-        return {staging_.size(), arenaGrowthCount_, uploadCount_};
+        return {staging_.size() + asyncStaging_.size(), arenaGrowthCount_, uploadCount_};
     }
 
 private:
     void writeStaging(const void* data, VkDeviceSize size, std::string_view name);
     void ensureStagingCapacity(VkDeviceSize requiredSize, std::string_view name);
+    void ensureAsyncStagingCapacity(VkDeviceSize requiredSize, std::string_view name);
     [[nodiscard]] VkCommandBuffer beginCommands();
     void submitAndWait(VkCommandBuffer commandBuffer);
     void setDebugName(VkObjectType objectType, std::uint64_t handle,
@@ -72,6 +89,11 @@ private:
     VkCommandBuffer commandBuffer_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
     Buffer staging_;
+    VkCommandPool asyncCommandPool_ = VK_NULL_HANDLE;
+    VkCommandBuffer asyncCommandBuffer_ = VK_NULL_HANDLE;
+    VkFence asyncFence_ = VK_NULL_HANDLE;
+    Buffer asyncStaging_;
+    bool asyncPending_ = false;
     std::uint64_t arenaGrowthCount_ = 0;
     std::uint64_t uploadCount_ = 0;
     bool enableDebugNames_ = false;

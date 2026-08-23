@@ -17,7 +17,7 @@ struct GameAudio::Impl
     bool engineInitialized = false;
     bool musicInitialized = false;
     float volume = 1.0f;
-    bool muted = false;
+    bool muted = true;
 };
 
 namespace {

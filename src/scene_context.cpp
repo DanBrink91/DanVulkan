@@ -47,26 +47,53 @@ bool boundsVisible(const assets::Bounds& bounds, std::span<const glm::vec4> plan
     }
     return true;
 }
+
+float smoothPopulationTransition(float distance, float center, float halfWidth,
+    float nearPopulation, float farPopulation)
+{
+    if (halfWidth <= 0.0f)
+    {
+        return distance <= center ? nearPopulation : farPopulation;
+    }
+    const float t = std::clamp(
+        (distance - (center - halfWidth)) / (2.0f * halfWidth), 0.0f, 1.0f);
+    const float smooth = t * t * (3.0f - 2.0f * t);
+    return std::lerp(nearPopulation, farPopulation, smooth);
+}
 }
 
 void SceneContext::reserveFrameScratch()
 {
-    indirectCommands.reserve(meshData.size());
-    drawData.reserve(meshData.size());
+    std::size_t maximumDrawCount = 0;
+    for (const MeshData& mesh : meshData)
+    {
+        maximumDrawCount += mesh.grass.enabled ? mesh.grass.tiles.size() : 1U;
+    }
+    indirectCommands.reserve(maximumDrawCount);
+    drawData.reserve(maximumDrawCount);
     animationUpdatePolicies_.reserve(animationActors_.size());
     std::array<std::size_t, PipelineVariantCount> variantCounts{};
+    std::size_t grassCount = 0;
     for (const MeshData& mesh : meshData)
     {
         if (mesh.pipelineVariant >= PipelineVariantCount)
         {
             throw std::runtime_error("scene contains an invalid pipeline variant");
         }
-        ++variantCounts[mesh.pipelineVariant];
+        if (mesh.grass.enabled)
+        {
+            ++grassCount;
+        }
+        else
+        {
+            ++variantCounts[mesh.pipelineVariant];
+        }
     }
     for (std::size_t variant = 0; variant < PipelineVariantCount; ++variant)
     {
         visibleMeshScratch_[variant].reserve(variantCounts[variant]);
     }
+    visibleGrassScratch_.reserve(grassCount);
 }
 
 assets::Bounds SceneContext::transformedBounds(const assets::Bounds& bounds,
@@ -290,6 +317,8 @@ SceneDrawCounts SceneContext::prepareDraws(const glm::mat4& view,
     drawData.clear();
     indirectCommands.clear();
     drawBatches.fill({});
+    grassDrawBatch = {};
+    visibleGrassScratch_.clear();
     for (std::vector<std::size_t>& visibleMeshes : visibleMeshScratch_)
     {
         visibleMeshes.clear();
@@ -306,7 +335,14 @@ SceneDrawCounts SceneContext::prepareDraws(const glm::mat4& view,
         }
         if (boundsVisible(aabbs[index], planes))
         {
-            visibleMeshScratch_[meshData[index].pipelineVariant].push_back(index);
+            if (meshData[index].grass.enabled)
+            {
+                visibleGrassScratch_.push_back(index);
+            }
+            else
+            {
+                visibleMeshScratch_[meshData[index].pipelineVariant].push_back(index);
+            }
         }
     }
 
@@ -346,6 +382,106 @@ SceneDrawCounts SceneContext::prepareDraws(const glm::mat4& view,
         batch.commandCount = static_cast<std::uint32_t>(indirectCommands.size()) -
             batch.firstCommand;
     }
+
+    grassDrawBatch.firstCommand = static_cast<std::uint32_t>(indirectCommands.size());
+    for (const std::size_t meshIndex : visibleGrassScratch_)
+    {
+        MeshData& mesh = meshData[meshIndex];
+        if (mesh.drawData.transformIndex < 0 ||
+            static_cast<std::size_t>(mesh.drawData.transformIndex) >= transformData.size())
+        {
+            throw std::runtime_error("grass draw references an invalid transform");
+        }
+        const glm::mat4& transform = transformData[mesh.drawData.transformIndex].model;
+        for (GrassTileDrawData& tile : mesh.grass.tiles)
+        {
+            const assets::Bounds bounds = transformedBounds(tile.localBounds, transform);
+            if (!boundsVisible(bounds, planes))
+            {
+                continue;
+            }
+            const float nearestX = std::clamp(cameraPosition.x,
+                bounds.minVertex.x, bounds.maxVertex.x);
+            const float nearestZ = std::clamp(cameraPosition.z,
+                bounds.minVertex.z, bounds.maxVertex.z);
+            const glm::vec2 offset(cameraPosition.x - nearestX, cameraPosition.z - nearestZ);
+            const float distance = glm::length(offset);
+
+            std::uint8_t lod = tile.lodState;
+            if (lod > 2U)
+            {
+                lod = distance <= mesh.grass.distances[0] ? 0U :
+                    (distance <= mesh.grass.distances[1] ? 1U : 2U);
+            }
+            else if (lod == 0U &&
+                distance > mesh.grass.distances[0] + mesh.grass.hysteresis)
+            {
+                lod = 1U;
+            }
+            else if (lod == 1U)
+            {
+                if (distance < mesh.grass.distances[0] - mesh.grass.hysteresis)
+                {
+                    lod = 0U;
+                }
+                else if (distance > mesh.grass.distances[1] + mesh.grass.hysteresis)
+                {
+                    lod = 2U;
+                }
+            }
+            else if (lod == 2U &&
+                distance < mesh.grass.distances[1] - mesh.grass.hysteresis)
+            {
+                lod = 1U;
+            }
+            tile.lodState = lod;
+
+            float population = 0.0f;
+            if (distance <= mesh.grass.distances[0] + mesh.grass.transitionBand)
+            {
+                population = smoothPopulationTransition(distance,
+                    mesh.grass.distances[0], mesh.grass.transitionBand,
+                    mesh.grass.populationRatios[0], mesh.grass.populationRatios[1]);
+            }
+            else if (distance <= mesh.grass.distances[1] + mesh.grass.transitionBand)
+            {
+                population = smoothPopulationTransition(distance,
+                    mesh.grass.distances[1], mesh.grass.transitionBand,
+                    mesh.grass.populationRatios[1], mesh.grass.populationRatios[2]);
+            }
+            else
+            {
+                population = smoothPopulationTransition(distance,
+                    mesh.grass.distances[2], mesh.grass.transitionBand,
+                    mesh.grass.populationRatios[2], 0.0f);
+            }
+            const std::uint32_t instanceCount = std::min(tile.bladeCount,
+                static_cast<std::uint32_t>(std::floor(
+                    static_cast<float>(tile.bladeCount) * population)));
+            if (instanceCount == 0U)
+            {
+                continue;
+            }
+
+            VkDrawIndexedIndirectCommand command{};
+            command.indexCount = mesh.grass.indexCounts[lod];
+            command.firstIndex = mesh.grass.firstIndices[lod];
+            command.firstInstance = static_cast<std::uint32_t>(drawData.size());
+            command.instanceCount = instanceCount;
+            command.vertexOffset = static_cast<std::int32_t>(mesh.vertexOffset);
+            indirectCommands.push_back(command);
+            DrawData tileDraw = mesh.drawData;
+            constexpr std::uint32_t vertexWords = sizeof(Vertex) / sizeof(std::uint32_t);
+            constexpr std::uint32_t grassRecordWords =
+                sizeof(PackedRuntimeGrassBlade) / sizeof(std::uint32_t);
+            tileDraw.vertexOffset = static_cast<std::int32_t>(
+                mesh.vertexOffset * vertexWords + tile.firstBlade * grassRecordWords);
+            tileDraw.jointOffset = static_cast<std::int32_t>(mesh.vertexOffset);
+            drawData.push_back(tileDraw);
+        }
+    }
+    grassDrawBatch.commandCount = static_cast<std::uint32_t>(indirectCommands.size()) -
+        grassDrawBatch.firstCommand;
     return { static_cast<std::uint32_t>(meshData.size()),
         static_cast<std::uint32_t>(indirectCommands.size()),
         static_cast<std::uint32_t>(animatedDraws_.size()),
@@ -363,6 +499,7 @@ std::uint64_t SceneContext::cpuScratchBytes() const noexcept
     {
         result += bucket.capacity() * sizeof(std::size_t);
     }
+    result += visibleGrassScratch_.capacity() * sizeof(std::size_t);
     return result;
 }
 
@@ -636,6 +773,8 @@ void SceneContext::resetScene(VkDevice device) noexcept
     jointMatrices_.clear();
     indirectCommands.clear();
     drawBatches.fill({});
+    grassDrawBatch = {};
+    visibleGrassScratch_.clear();
     for (std::vector<std::size_t>& bucket : visibleMeshScratch_)
     {
         bucket.clear();

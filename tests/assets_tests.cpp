@@ -55,6 +55,21 @@ int main()
                                            albedo->height * 4U,
                 "decoded texture byte count is invalid");
 
+        const danvulkan::assets::TextureAsset forestFloor =
+            danvulkan::assets::loadTexture("textures/forest_floor_albedo.png");
+        require(forestFloor.width > 0 && forestFloor.height > 0 &&
+            forestFloor.colorSpace == danvulkan::assets::ColorSpace::srgb &&
+            forestFloor.rgba8.size() == static_cast<std::size_t>(forestFloor.width) *
+                forestFloor.height * 4U && forestFloor.rgba32f.empty(),
+            "forest-floor decoder did not produce an sRGB RGBA8 payload");
+        const danvulkan::assets::TextureAsset forestPath =
+            danvulkan::assets::loadTexture("textures/forest_path_albedo.png");
+        require(forestPath.width > 0 && forestPath.height > 0 &&
+            forestPath.colorSpace == danvulkan::assets::ColorSpace::srgb &&
+            forestPath.rgba8.size() == static_cast<std::size_t>(forestPath.width) *
+                forestPath.height * 4U && forestPath.rgba32f.empty(),
+            "forest-path decoder did not produce an sRGB RGBA8 payload");
+
         const danvulkan::assets::TextureAsset environment =
             danvulkan::assets::loadEnvironment("textures/texture.jpg");
         require(environment.width > 0 && environment.height > 0 &&
@@ -115,7 +130,7 @@ int main()
         const auto& glbMaterial = glb.materials().front();
         require(glbMaterial.unlit, "KHR_materials_unlit was not imported");
         const auto* glbAlbedo = glb.find(glbMaterial.albedoTexture);
-        require(glbAlbedo != nullptr && glbAlbedo->width == 2048 && glbAlbedo->height == 2048,
+        require(glbAlbedo != nullptr && glbAlbedo->width == 4096 && glbAlbedo->height == 4096,
                 "embedded GLB atlas dimensions are incorrect");
         require(glbAlbedo->sampler.mipmapMode == danvulkan::assets::TextureMipmapMode::linear,
                 "GLB trilinear sampler was not imported");

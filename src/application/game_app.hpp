@@ -14,7 +14,7 @@ class GameApp
 {
 public:
     explicit GameApp(RendererConfig config, bool enableBackgroundMusic = true,
-        bool showUiInitially = false);
+        bool showUiInitially = false, bool terrainTraversalCheck = false);
     ~GameApp();
 
     GameApp(const GameApp&) = delete;
@@ -34,6 +34,7 @@ private:
     GameUiControls uiControls_;
     GameUiControls appliedUiControls_;
     bool backgroundMusicEnabled_ = true;
+    bool terrainTraversalCheck_ = false;
 };
 
 }

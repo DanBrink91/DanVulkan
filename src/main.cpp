@@ -297,11 +297,18 @@ int main(int argc, char** argv)
         bool stepDriven = false;
         bool animatedStress = false;
         bool animatedStressAdaptiveNlerp = false;
+        bool terrainTraversalCheck = false;
         bool applicationDriven = argc == 1;
         if (argc > 1 && std::string_view(argv[1]) == "--application-smoke-test")
         {
             config.maxFrames = 120;
             applicationDriven = true;
+        }
+        else if (argc > 1 && std::string_view(argv[1]) == "--terrain-traversal-check")
+        {
+            config.maxFrames = 5000;
+            applicationDriven = true;
+            terrainTraversalCheck = true;
         }
         else if (argc > 1 && std::string_view(argv[1]) == "--smoke-test")
         {
@@ -339,6 +346,7 @@ int main(int argc, char** argv)
              std::string_view(argv[1]) == "--animated-stress-test-nlerp"))
         {
             config.maxFrames = animatedStressFrameCount;
+            config.modelPath = "models/triangle.gltf";
             config.additionalScenes.clear();
             animatedStress = true;
             animatedStressAdaptiveNlerp =
@@ -355,7 +363,8 @@ int main(int argc, char** argv)
             const bool showUiInitially = argc > 1 &&
                 std::string_view(argv[1]) == "--application-smoke-test";
             danvulkan::application::GameApp application(
-                std::move(config), enableBackgroundMusic, showUiInitially);
+                std::move(config), enableBackgroundMusic, showUiInitially,
+                terrainTraversalCheck);
             application.run();
             return EXIT_SUCCESS;
         }

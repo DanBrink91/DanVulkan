@@ -18,6 +18,11 @@ constexpr float minimumNearClip = 0.0001f;
 constexpr float minimumDirectionLengthSquared = 0.000001f;
 }
 
+GameCamera::GameCamera(CameraMode initialMode) noexcept
+    : mode_(initialMode)
+{
+}
+
 void GameCamera::frame(const glm::vec3& minimum, const glm::vec3& maximum,
     std::uint32_t viewportWidth, std::uint32_t viewportHeight)
 {
@@ -76,6 +81,13 @@ void GameCamera::setFollowTarget(const glm::vec3& position,
     if (glm::dot(horizontalForward, horizontalForward) > minimumDirectionLengthSquared)
     {
         followForward_ = glm::normalize(horizontalForward);
+    }
+    if (mode_ == CameraMode::follow)
+    {
+        const glm::vec3 cameraPosition = followTarget_ -
+            followForward_ * followDistance_ + glm::vec3(0.0f, followHeight_, 0.0f);
+        setPose(cameraPosition, followTarget_);
+        rebuildProjection();
     }
 }
 

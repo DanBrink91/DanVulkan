@@ -1,0 +1,287 @@
+#version 460
+#extension GL_ARB_shader_draw_parameters : require
+
+layout(set = 0, binding = 0) uniform UniformBufferObject
+{
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPositionTime;
+    vec4 vegetationInteractorPositionRadius;
+    uvec4 lightingCounts;
+    vec4 environmentTintIntensity;
+    vec4 environmentControls;
+} ubo;
+
+// Grass shares the ordinary vertex storage allocation, but consumes it as raw 32-bit words.
+// Each compact blade is twelve words (48 bytes); draw.vertexOffset is its absolute word offset.
+layout(set = 0, binding = 4) readonly buffer Geometry
+{
+    uint geometryWords[];
+};
+
+struct TransformData
+{
+    mat4 model;
+};
+
+layout(set = 0, binding = 3) readonly buffer Transforms
+{
+    TransformData transforms[];
+};
+
+struct DrawData
+{
+    int materialIndex;
+    int transformIndex;
+    int vertexOffset;
+    int jointOffset;
+};
+
+layout(set = 0, binding = 2) readonly buffer Draws
+{
+    DrawData draws[];
+};
+
+layout(location = 0) out vec2 outTexCoord;
+layout(location = 1) flat out int outMaterialIndex;
+layout(location = 2) out vec3 outWorldNormal;
+layout(location = 3) out vec4 outWorldTangent;
+layout(location = 4) out vec3 outWorldPosition;
+layout(location = 5) out vec3 outVertexColor;
+layout(location = 6) out float outSurfaceCoverage;
+
+vec3 cubicBezier(vec3 p0, vec3 p1, vec3 p2, vec3 p3, float t)
+{
+    float inverse = 1.0 - t;
+    return inverse * inverse * inverse * p0 +
+        3.0 * inverse * inverse * t * p1 +
+        3.0 * inverse * t * t * p2 + t * t * t * p3;
+}
+
+vec3 cubicBezierDerivative(vec3 p0, vec3 p1, vec3 p2, vec3 p3, float t)
+{
+    float inverse = 1.0 - t;
+    return 3.0 * inverse * inverse * (p1 - p0) +
+        6.0 * inverse * t * (p2 - p1) +
+        3.0 * t * t * (p3 - p2);
+}
+
+vec3 octDecode(vec2 encoded)
+{
+    vec3 direction = vec3(encoded,
+        1.0 - abs(encoded.x) - abs(encoded.y));
+    if (direction.z < 0.0)
+    {
+        vec2 signValue = vec2(
+            direction.x >= 0.0 ? 1.0 : -1.0,
+            direction.y >= 0.0 ? 1.0 : -1.0);
+        direction.xy = (vec2(1.0) - abs(direction.yx)) * signValue;
+    }
+    return normalize(direction);
+}
+
+float hash11(float value)
+{
+    value = fract(value * 0.1031);
+    value *= value + 33.33;
+    return fract(value * (value + value));
+}
+
+void main()
+{
+    DrawData draw = draws[gl_BaseInstance];
+    int bladeWord = draw.vertexOffset +
+        (gl_InstanceIndex - gl_BaseInstance) * 12;
+    vec3 bladePosition = vec3(
+        uintBitsToFloat(geometryWords[bladeWord]),
+        uintBitsToFloat(geometryWords[bladeWord + 1]),
+        uintBitsToFloat(geometryWords[bladeWord + 2]));
+    vec3 bladeNormal = octDecode(unpackSnorm2x16(geometryWords[bladeWord + 3]));
+    vec3 bladeBendDirection = octDecode(
+        unpackSnorm2x16(geometryWords[bladeWord + 4]));
+    vec3 bladeColor = unpackUnorm4x8(geometryWords[bladeWord + 5]).rgb;
+    vec2 dimensions = unpackHalf2x16(geometryWords[bladeWord + 6]);
+    vec2 curve = unpackHalf2x16(geometryWords[bladeWord + 7]);
+    vec2 shape = unpackHalf2x16(geometryWords[bladeWord + 8]);
+    vec2 phases = unpackHalf2x16(geometryWords[bladeWord + 9]);
+    vec2 controls = unpackHalf2x16(geometryWords[bladeWord + 10]);
+    vec2 bendRank = unpackHalf2x16(geometryWords[bladeWord + 11]);
+    // jointOffset is unused by grass and carries the allocation base. vertexOffset can then
+    // point at the first compact blade record of an independently culled tile.
+    int templateVertex = gl_VertexIndex - draw.jointOffset;
+    int localVertex = 0;
+    int segmentCount = 0;
+    int leafIndex = 0;
+    if (templateVertex >= 50)
+    {
+        localVertex = templateVertex - 50;
+        segmentCount = 2;
+    }
+    else if (templateVertex >= 34)
+    {
+        if (templateVertex >= 42)
+        {
+            localVertex = templateVertex - 42;
+            leafIndex = 1;
+        }
+        else
+        {
+            localVertex = templateVertex - 34;
+        }
+        segmentCount = 3;
+    }
+    else if (templateVertex >= 24)
+    {
+        localVertex = templateVertex - 24;
+        segmentCount = 4;
+        leafIndex = 2;
+    }
+    else if (templateVertex >= 14)
+    {
+        localVertex = templateVertex - 14;
+        segmentCount = 4;
+        leafIndex = 1;
+    }
+    else
+    {
+        localVertex = templateVertex;
+        segmentCount = 6;
+    }
+    float t = float(localVertex / 2) / float(segmentCount);
+    float sideSign = (localVertex & 1) == 0 ? -1.0 : 1.0;
+
+    vec3 up = normalize(bladeNormal);
+    vec3 bendDirection = normalize(
+        bladeBendDirection - up * dot(bladeBendDirection, up));
+    vec3 crossDirection = normalize(cross(up, bendDirection));
+    float tuftSeed = bladePosition.x * 71.17 + bladePosition.y * 37.31 +
+        bladePosition.z * 93.73 + phases.y * 4.11;
+    float leafRandom = hash11(tuftSeed + float(leafIndex) * 19.19);
+    float leafSignedRandom = leafRandom * 2.0 - 1.0;
+    float leafAngle = leafIndex == 0
+        ? leafSignedRandom * 0.16
+        : (leafIndex == 1 ? 0.82 : -0.91) + leafSignedRandom * 0.24;
+    float orientation = controls.y + leafAngle;
+    vec3 widthDirection = normalize(
+        crossDirection * cos(orientation) + bendDirection * sin(orientation));
+    vec3 leafLeanDirection = normalize(cross(up, widthDirection));
+
+    float leafHeightScale = leafIndex == 0
+        ? mix(0.98, 1.08, leafRandom)
+        : mix(0.70, 0.91, leafRandom);
+    float leafWidthScale = leafIndex == 0
+        ? mix(0.96, 1.10, leafRandom)
+        : mix(0.72, 0.91, leafRandom);
+    float height = dimensions.x * leafHeightScale;
+    float halfWidth = dimensions.y * leafWidthScale;
+    float stiffness = clamp(controls.x, 0.0, 1.0);
+    float curveBias = clamp(curve.x, 0.0, 1.0);
+    float taper = max(curve.y, 0.1);
+    float flutterStrength = max(shape.x, 0.0);
+    float bladePhase = phases.y;
+    float camber = clamp(shape.y, -1.0, 1.0);
+
+    // Companion leaves emerge from the same root patch but do not occupy the same plane.
+    float rootSide = leafIndex == 0 ? 0.0 : (leafIndex == 1 ? 1.0 : -1.0);
+    bladePosition += widthDirection * halfWidth * rootSide * 1.25;
+
+    mat4 model = transforms[draw.transformIndex].model;
+    mat3 inverseModel = inverse(mat3(model));
+    vec3 worldBladePosition = (model * vec4(bladePosition, 1.0)).xyz;
+    vec3 prevailingWind = normalize(vec3(0.78, 0.0, 0.63));
+    prevailingWind = normalize(prevailingWind - up * dot(prevailingWind, up));
+    // The packed clump direction already includes the low-frequency terrain flow. Let it steer
+    // the prevailing wind so adjacent patches sweep together without becoming uniform.
+    vec3 windDirection = normalize(mix(prevailingWind, bendDirection, 0.34));
+    float time = ubo.cameraPositionTime.w;
+    vec2 windAxis = normalize(prevailingWind.xz);
+    vec2 crossWindAxis = vec2(-windAxis.y, windAxis.x);
+    float alongWind = dot(worldBladePosition.xz, windAxis);
+    float acrossWind = dot(worldBladePosition.xz, crossWindAxis);
+    float frontPhase = alongWind * 7.2 - time * 1.18 +
+        sin(acrossWind * 2.1 + time * 0.19) * 0.42;
+    float travelingBand = pow(smoothstep(0.20, 1.0,
+        sin(frontPhase) * 0.5 + 0.5), 1.7);
+    float broadSway = sin(alongWind * 1.35 - time * 0.54 + phases.x * 0.24) * 0.28;
+    float clumpPulse = sin(time * 0.76 + phases.x) * 0.12;
+    float windBend = (travelingBand * 0.78 + broadSway + clumpPulse) *
+        mix(0.15, 0.042, stiffness);
+    float flutterWave =
+        sin(time * 4.6 + bladePhase + bladePosition.x * 3.1) * 0.72 +
+        sin(time * 7.7 - bladePhase * 0.61 + bladePosition.z * 4.3) * 0.28;
+    float flutterBend = flutterWave * flutterStrength * mix(0.034, 0.008, stiffness);
+    float companionLean = leafIndex == 0 ? 0.0 : mix(0.055, 0.13, leafRandom);
+    vec3 totalBend = bendDirection * bendRank.x +
+        leafLeanDirection * companionLean * rootSide +
+        windDirection * windBend + widthDirection * flutterBend;
+
+    vec2 interactionOffset = worldBladePosition.xz -
+        ubo.vegetationInteractorPositionRadius.xz;
+    float interactionRadius = ubo.vegetationInteractorPositionRadius.w;
+    float interactionDistance = length(interactionOffset);
+    float interaction = interactionRadius > 0.0
+        ? 1.0 - smoothstep(interactionRadius * 0.22, interactionRadius,
+            interactionDistance)
+        : 0.0;
+    vec3 worldInteractionDirection = interactionDistance > 0.00001
+        ? normalize(vec3(interactionOffset.x, 0.0, interactionOffset.y))
+        : prevailingWind;
+    vec3 localInteractionDirection = normalize(
+        inverseModel * worldInteractionDirection);
+    localInteractionDirection = normalize(localInteractionDirection -
+        up * dot(localInteractionDirection, up));
+    totalBend += localInteractionDirection * interaction *
+        mix(0.92, 0.58, stiffness);
+
+    float droop = mix(0.035, leafIndex == 0 ? 0.095 : 0.16, leafRandom) *
+        mix(1.0, 0.58, stiffness);
+
+    vec3 p0 = bladePosition;
+    vec3 p1 = p0 + up * height * mix(0.31, 0.39, curveBias) +
+        totalBend * height * mix(0.01, 0.055, curveBias);
+    vec3 p2 = p0 + up * height * mix(0.69, 0.78, curveBias) +
+        totalBend * height * mix(0.31, 0.62, curveBias) - up * height * droop * 0.18;
+    vec3 p3 = p0 + up * height *
+        (1.0 - droop - interaction * 0.22) + totalBend * height * 1.16;
+    vec3 center = cubicBezier(p0, p1, p2, p3, t);
+    vec3 centerDerivative = cubicBezierDerivative(p0, p1, p2, p3, t);
+    float camberEnvelope = sin(t * 3.14159265) * mix(0.35, 1.0, t);
+    float camberDerivative = 3.14159265 * cos(t * 3.14159265) * mix(0.35, 1.0, t) +
+        sin(t * 3.14159265) * 0.65;
+    center += widthDirection * camber * halfWidth * camberEnvelope;
+    centerDerivative += widthDirection * camber * halfWidth * camberDerivative;
+    vec3 derivative = normalize(centerDerivative);
+    vec3 ribbonBase = normalize(widthDirection -
+        derivative * dot(widthDirection, derivative));
+    vec3 ribbonNormal = normalize(cross(ribbonBase, derivative));
+    float twistAngle = (leafSignedRandom * 0.82 + camber * 0.28) *
+        smoothstep(0.12, 1.0, t);
+    vec3 ribbonWidth = normalize(
+        ribbonBase * cos(twistAngle) + ribbonNormal * sin(twistAngle));
+    float rootProfile = mix(0.70, 1.0, smoothstep(0.0, 0.13, t));
+    float middleFullness = 1.0 + sin(t * 3.14159265) * 0.12;
+    float width = halfWidth * rootProfile * middleFullness *
+        pow(max(1.0 - t, 0.0), taper);
+    vec3 position = center + ribbonWidth * width * sideSign;
+    vec3 normal = normalize(cross(ribbonWidth, derivative));
+
+    vec4 worldPosition = model * vec4(position, 1.0);
+    mat3 normalMatrix = transpose(inverseModel);
+    vec3 worldNormal = normalize(normalMatrix * normal);
+    vec3 worldTangent = normalize(mat3(model) * derivative);
+
+    gl_Position = ubo.projection * ubo.view * worldPosition;
+    outTexCoord = vec2(sideSign * 0.5 + 0.5, t);
+    outMaterialIndex = draw.materialIndex;
+    outWorldNormal = worldNormal;
+    // Magnitude two marks the procedural grass lighting model while retaining a positive
+    // handedness sign for the shared material-normal path.
+    outWorldTangent = vec4(worldTangent, 2.0);
+    outWorldPosition = worldPosition.xyz;
+    float colorHeight = smoothstep(0.0, 1.0, t);
+    vec3 leafColor = bladeColor * mix(0.92, 1.07, leafRandom);
+    outVertexColor = mix(leafColor * 0.54,
+        min(leafColor * 1.24 + vec3(0.035, 0.065, 0.008), vec3(1.0)),
+        colorHeight);
+    outSurfaceCoverage = 1.0;
+}

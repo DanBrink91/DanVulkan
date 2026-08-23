@@ -58,6 +58,49 @@ builds the debug overlay. These are the primary files to extend when building a 
 feature. The normal no-argument launch uses this layer, while command-line validation and profiling
 modes stay isolated in `main.cpp`.
 
+The application demo maintains a 5-by-5 window of seeded, five-octave `GeneratedTerrain` chunks
+around the player. Startup publishes a 3-by-3 terrain safety window and full center vegetation in
+one non-blocking transfer batch, then renders while the rest fills progressively. Directional
+prefetch uses two persistent priority workers with stale-request cancellation. Workers generate,
+validate, tile-sort, and pack grass into its final GPU records; the render thread publishes at most
+one ready chunk between frames. A whole chunk's terrain, grass, trunks, and canopy share one
+asynchronous transfer submission instead of eight fence-waiting range uploads. The committed
+window remains visible until its replacement is complete, after which the old edge is retired.
+Run `DanVulkan --terrain-traversal-check` (or CTest's `danvulkan_terrain_traversal`) for a
+scripted Vulkan check that crosses two terrain chunk boundaries, waits for the requested 5-by-5
+vegetation window, and reports maximum render/publish times plus stall counts.
+Application startup reserves enough geometry for the active window plus a diagonal transition, so
+streaming does not resize the combined GPU buffers. Each 97-by-97 indexed patch is generated from
+world-space noise, keeping positions and normals continuous across seams while the steady live
+geometry budget remains fixed as the playable world expands. Mesh vertices, interpolated gameplay
+heights, slope normals, and elevation/slope colors all come from the same CPU samples. A shared
+world-space `TerrainSurfaceField` adds a meandering dirt-yellow path and seamless Voronoi grass
+clumps. The procedural provider is intentionally interchangeable with a future authored paint-map
+provider: both produce grass coverage, dirt weight, and grass traits, and their samples can be
+blended. Each forest chunk considers 50,000 globally jittered blade positions, suppresses them on
+the path, and gives every surviving blade the height, direction, color, bend, stiffness, and wind
+phase of its nearest Voronoi site. Grass is stored as one compact record per blade and expanded by
+a dedicated vertex shader into a lit cubic-Bezier ribbon. World-aligned internal tiles are culled
+and assigned six-, three-, or two-segment curve LOD independently. Hysteresis stabilizes segment
+changes while ranked populations transition smoothly between 100%, 50%, 18%, and zero density.
+The close curve has a broadened root, a true pointed tip, per-blade taper, curvature, and camber,
+plus corrected ribbon normals. A low-frequency flow field aligns neighboring Voronoi clumps,
+traveling gust fronts move coherently across the field, and restrained individual flutter keeps
+the close leaves from looking synchronized. The shared fragment shader adds center highlights,
+soft two-sided diffuse response, and a path-aware short-growth underlayer without allocating more
+grass records. Beneath it, a photographed-style forest-floor albedo is mirrored in world space
+for seamless chunk-independent mapping and mixed with macro tint variation, procedural bump and
+roughness detail, and root darkening. Exposed earth, moss, tiny plants, bark, twigs, and needles
+remain recognizable wherever the grass canopy opens.
+Packed dirt paths use a companion photographed-style albedo with their own mirrored world-space
+scale, shallow irregularity, feathered moss edges, and sparse embedded pebbles. A per-frame
+vegetation interactor also pushes
+and lowers nearby blades around the character entirely on the GPU.
+Trees remain spaced low-poly trunks with layered faceted canopies. A warm key and cool fill follow
+the player over a brighter neutral environment. In follow-camera mode, the character controller
+accelerates and brakes, turns the animated actor toward travel, follows streamed terrain height,
+rejects steep slopes, and crosses chunk boundaries without changing its WASD basis.
+
 Reusable hosts include `<danvulkan/renderer.hpp>`, create a `RendererConfig`, and own a `VulkanRenderer`. The public header hides Vulkan and windowing implementation details behind a private implementation. Applications can either use the compatibility `run()` loop or own the loop through `initialize()`, `beginFrame()`, `submitScene()`, `endFrame()`, and `shutdown()`:
 
 ```cpp
@@ -85,7 +128,16 @@ while (!renderer.shouldClose())
 renderer.shutdown();
 ```
 
-The renderer loads the scene named by `RendererConfig::modelPath` during initialization. `SceneSubmission` supplies per-frame view, point-light, and environment controls. Additional `ScenePointLight` values can be appended independently, up to `RendererConfig::maxPointLights`. `sceneBounds()` supplies optional combined world-space bounds for app-owned camera framing. `sceneMeshes()`, `sceneInstances()`, and `sceneMaterials()` expose generation-tagged handles plus their current values. Between frames, games can create and remove PBR materials, upload and remove meshes, create and remove instances, and update world transforms or material factors. Destroyed material, mesh, and instance slots are reusable, but their generations advance so stale handles are rejected.
+The renderer loads the scene named by `RendererConfig::modelPath` during initialization. The path
+may be empty when `additionalScenes` supplies the initial renderable content, as it does in the
+application demo. `SceneSubmission` supplies per-frame view, point-light, and environment controls.
+Additional `ScenePointLight` values can be appended independently, up to
+`RendererConfig::maxPointLights`. `sceneBounds()` supplies optional combined world-space bounds for
+app-owned camera framing. `sceneMeshes()`, `sceneInstances()`, and `sceneMaterials()` expose
+generation-tagged handles plus their current values. Between frames, games can create and remove
+PBR materials, upload and remove meshes, create and remove instances, and update world transforms
+or material factors. Destroyed material, mesh, and instance slots are reusable, but their
+generations advance so stale handles are rejected.
 
 Internally, physical-device probing and logical-device ownership live in a focused device context. Selection requires Vulkan 1.4, every renderer feature, complete graphics/presentation queues, and adequate swapchain support; suitable candidates are scored deterministically rather than accepted in driver enumeration order. Queue-family selection and candidate scoring are Vulkan-free planning functions with dedicated CPU tests.
 
@@ -99,7 +151,14 @@ Uploaded-scene ownership is isolated in a scene context. It holds scene metadata
 
 Lighting ownership is isolated in a lighting context. It holds renderer-owned RGBA32F irradiance, GGX-prefiltered specular, and split-sum BRDF images plus persistently mapped point-light storage for each swapchain image. `RendererConfig::environmentMap` accepts an optional decoded RGBA8 or linear RGBA32F equirectangular environment without exposing Vulkan; `assets::loadEnvironment("sky.hdr")` preserves HDR values, while omitting the map selects a small neutral fallback. A Vulkan-free startup stage builds the three IBL inputs, and the shader combines them with bounded multi-light Cook-Torrance direct lighting. Directional/spot lights and shadows remain future refinements.
 
-`RendererConfig::additionalScenes` composes more glTF/GLB assets above the primary scene with a caller-supplied root transform. The demo uses it to place `ninja_run_free_fire_emote.glb` at village scale and automatically loops that file's first animation. Skinned vertices retain four joint indices and normalized weights; a CPU animation player evaluates linear or step translation, rotation, and scale channels, propagates the node hierarchy, and writes a per-frame joint palette consumed by the vertex shader. This temporary character proves the animation path while `naruto.glb` remains static and cannot yet receive the clip without being rigged.
+`RendererConfig::additionalScenes` composes glTF/GLB assets with a caller-supplied root transform,
+with or without a primary scene. The demo uses it to place `ninja_run_free_fire_emote.glb` at
+gameplay scale above the generated terrain and automatically loops that file's first animation.
+Skinned vertices retain four joint indices and normalized weights; a CPU animation player evaluates
+linear or step translation, rotation, and scale channels, propagates the node hierarchy, and writes
+a per-frame joint palette consumed by the vertex shader. This temporary character proves the
+animation path while `naruto.glb` remains static and cannot yet receive the clip without being
+rigged.
 
 `sceneAnimations()` exposes the active scene's clips through generation-tagged handles. The first clip still autoplays for convenience, but a host can select and control it between frames:
 
@@ -132,7 +191,8 @@ arbitrary matrix-authored locals retain the general multiplication path.
 
 The application demo captures the mouse for first-person look, uses WASD to move the free camera,
 scrolls forward/backward, toggles between free and ninja-follow cameras when C is released, and
-closes with Escape. In follow mode, WASD instead moves the ninja while the chase camera tracks it.
+closes with Escape. The application starts in follow mode, where WASD moves the ninja while the
+chase camera tracks it.
 F1 toggles the application-owned immediate-mode control and statistics panel; opening it releases
 the pointer and suspends gameplay input. Clicking outside the panel or pressing WASD/C returns
 keyboard and captured-mouse control to gameplay while leaving the panel visible. Tab re-enters UI
@@ -182,6 +242,16 @@ allocations are outside the VMA totals.
 
 `RendererConfig::initialVertexCapacity` and `initialIndexCapacity` reserve device-local geometry ranges (4096 vertices and 8192 indices by default). Runtime uploads allocate a pair of free ranges and transfer only the new vertex/index bytes. `destroyMesh()` rejects meshes with live instances and defers returning their ranges until every swapchain image that could contain an older draw has completed. Adjacent free ranges are coalesced. If no contiguous range fits, capacity grows geometrically; existing geometry is copied GPU-to-GPU, swapchain images migrate to the replacement vertex buffer after their fences complete, and both old buffers remain alive until migration finishes. Packed scene geometry exists on the CPU only while the initial or replacement upload is being prepared; spare GPU capacity and later growth do not retain a full CPU mirror.
 
+`uploadGrass()` uses those same generation-safe geometry ranges for semantic blade records and a
+small shared-in-upload curve template. Each upload is internally sorted into world-aligned 0.25-unit
+tiles, keeping one allocation and transfer per streamed terrain chunk while letting the draw planner
+frustum-cull and select curve detail independently per tile. Segment LOD uses a hysteresis dead band,
+and stable per-blade ranks progressively thin density through transition bands rather than popping a
+whole tile. The grass vertex pipeline evaluates the curve and wind without materializing its rendered
+vertices on the CPU. Five padding scalars in the existing blade record carry curvature bias, taper,
+flutter strength, flutter phase, and camber, so the close-quality upgrade adds no GPU record size or
+transfer bandwidth; the semantic CPU generation record temporarily carries those controls.
+
 `RendererConfig::maxTextures` reserves bindless descriptor capacity (256 by default, clamped to the physical device limits). `RendererConfig::textureMipLodBias` controls the renderer-wide sampler bias; its mild `-0.5` default keeps atlas-backed terrain a little sharper while generated mipmaps, trilinear filtering, and anisotropy still suppress minification shimmer. `uploadTexture()` accepts a decoded `TextureAsset`, creates its Vulkan image/view/sampler, and returns a persistent texture handle. `updateMaterialTextures()` can rebind the five core glTF texture roles between frames. `destroyTexture()` rejects textures still referenced by a material, replaces the freed descriptor slot with a valid fallback, and advances that slot's generation before reuse. Each swapchain image receives new descriptors only after its fence completes; retired images, views, and samplers stay alive until every descriptor set has migrated.
 
 `RendererConfig::maxMaterials` reserves per-swapchain-image material storage (2048 by default, clamped to the shader ABI limit). A `RuntimeMaterialDescription` combines PBR factors, texture handles, alpha mode, and sidedness; newly created materials can be passed directly to later mesh uploads without rebuilding descriptors or waiting for the device to become idle. `destroyMaterial()` rejects materials still referenced by a mesh, removes the slot from scene queries, and advances its generation before reuse. Per-image material buffers make the reused GPU index visible only after the corresponding in-flight fence completes.
@@ -190,6 +260,6 @@ The renderer uses explicit frame resources, synchronization2, dynamic rendering,
 
 The GPU material path implements glTF metallic-roughness shading with base color, normal scale, packed metallic/roughness, occlusion strength, and emissive inputs. Texture filtering and wrap modes are imported per glTF texture. Opaque, alpha-mask, and alpha-blended materials use explicit single- and double-sided pipeline variants; transparent draws are sorted back-to-front within each culling variant.
 
-CPU asset types live in the separate Vulkan-free `DanVulkan::Assets` library and `<danvulkan/assets.hpp>`. `.gltf`, `.glb`, and compatibility OBJ imports produce a `SceneAsset` with generation-tagged resource handles, node hierarchies, transforms, mesh instances, decoded textures, and PBR metallic-roughness inputs. Only the renderer upload boundary creates GPU resources. The bundled demo now loads `models/naruto_hiddenly_village.glb` by default. The next stages are described in [docs/MODERNIZATION.md](docs/MODERNIZATION.md).
+CPU asset types live in the separate Vulkan-free `DanVulkan::Assets` library and `<danvulkan/assets.hpp>`. `.gltf`, `.glb`, and compatibility OBJ imports produce a `SceneAsset` with generation-tagged resource handles, node hierarchies, transforms, mesh instances, decoded textures, and PBR metallic-roughness inputs. Only the renderer upload boundary creates GPU resources. The renderer default is the animated ninja asset; the application demo starts without the village and combines the scaled character with generated terrain. The next stages are described in [docs/MODERNIZATION.md](docs/MODERNIZATION.md).
 
 The bundled Sketchfab-derived Naruto, village, and ninja-run assets declare CC-BY-4.0 metadata inside their GLB files. Their embedded attribution names and source URLs must be retained when redistributing the assets.
